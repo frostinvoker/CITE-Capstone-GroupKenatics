@@ -1,0 +1,1734 @@
+import { DailyOfferSchedule } from '../../components/messaging/DailyOfferSchedule';
+import { OfferResponseDeadline } from '../../components/OfferResponseDeadline';
+import { offerResponseStatus } from '../../lib/offerResponse';
+import { useOfferExpiry } from '../../hooks/useOfferExpiry';
+import { OfferCancellationDialog } from '../../components/OfferCancellationDialog';
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Archive,
+  Ban,
+  Check,
+  CheckCheck,
+  ChevronLeft,
+  Ellipsis,
+  Flag,
+  MessagesSquare,
+  MoreVertical,
+  Search,
+  Send,
+  SquarePen,
+  Trash2,
+} from "lucide-react";
+import { motion, AnimatePresence, useReducedMotion } from "motion/react";
+import { motionTokens, seconds } from "@/constants/motion";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+import { toast } from "../../lib/toast";
+import { LAYER_Z } from "../../components/ui/layers";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { ROUTES } from "../../utils/routes";
+import { isStaffConversation } from "../../utils/staffConversation";
+import { isEmployer as checkIsEmployer } from "../../utils/dashboardRoutes";
+import { useAuth } from "../../contexts/AuthContext";
+import { Skeleton } from "../../components/ui/Skeleton";
+import { useMessaging, conversationIdOf, type Contact, type ChatMessage as Message } from "../../contexts/MessagingContext";
+import { CompletionMessageCard } from '../../components/messaging/CompletionMessageCard';
+import { ChecklistTable, HireChecklistDialog } from '../../components/HireChecklist';
+import { formatCurrency, formatDate, getActiveDateLocale } from "../../lib/formatters";
+import { ConfirmDialog } from "../../components/ui/index";
+import { ConversationReportDialog } from "../../components/messaging/ConversationReportDialog";
+import { MessagingSafetyNotice } from "../../components/messaging/MessagingSafetyNotice";
+import { RecipientDirectoryDialog } from "../../components/messaging/RecipientDirectoryDialog";
+import { useAdminPermissions } from "../../hooks/useAdminPermissions";
+import {
+  getConversationWithUser,
+  sendMessage,
+  editMessage,
+  blockUser,
+  unblockUser,
+  archiveConversation,
+  deleteConversation,
+  markMessagesAsRead,
+  respondToJobOffer,
+  confirmOfferHire,
+  type MessageRecipient,
+} from "../../services/api";
+
+// Consecutive messages from the same sender inside this window collapse into
+// one avatar/name/time header instead of repeating on every bubble.
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+// How long a peer's typing indicator stays up without a fresh "still typing" ping.
+const TYPING_STALE_MS = 5000;
+// How long after the user stops typing we tell the peer they've stopped.
+const TYPING_STOP_DELAY_MS = 2500;
+
+const getInitials = (name: string): string => {
+  const parts = name.split(" ");
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return name.substring(0, 2).toUpperCase();
+};
+
+const formatTime = (t: TFunction, dateString: string): string => {
+  const date = new Date(dateString);
+  const now = new Date();
+  const diff = now.getTime() - date.getTime();
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+
+  if (minutes < 1) return t("messages.time.now");
+  if (minutes < 60) return t("messages.time.minutesAgo", { count: minutes });
+  if (hours < 24) return t("messages.time.hoursAgo", { count: hours });
+  if (days < 7) return t("messages.time.daysAgo", { count: days });
+  return formatDate(date);
+};
+
+const formatMessageTime = (dateString: string): string => {
+  const date = new Date(dateString);
+  return new Intl.DateTimeFormat(getActiveDateLocale(), { hour: 'numeric', minute: '2-digit', hour12: true }).format(date);
+};
+
+const formatMessageDay = (t: TFunction, dateString: string): string => {
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const today = new Date();
+  const sameDay =
+    date.getDate() === today.getDate() &&
+    date.getMonth() === today.getMonth() &&
+    date.getFullYear() === today.getFullYear();
+  if (sameDay) return t("messages.time.today");
+
+  return formatDate(date, {
+    month: "short",
+    day: "numeric",
+    year: date.getFullYear() === today.getFullYear() ? undefined : "numeric",
+  });
+};
+
+const pickArray = <T,>(...candidates: any[]): T[] => {
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate as T[];
+    }
+  }
+  return [];
+};
+
+// Keyed lookup (not a template-literal key) so this stays type-safe under
+// i18next's strict key typing, matching the STATUS_LABEL_KEYS pattern used
+// on the worker AppliedJobs page for the same kind of server enum.
+const OFFER_STATUS_LABEL_KEYS: Record<string, string> = {
+  pending: "messages.offerCard.status.pending",
+  accepted: "messages.offerCard.status.accepted",
+  rejected: "messages.offerCard.status.rejected",
+  cancelled: "messages.offerCard.status.cancelled",
+  hired: "messages.offerCard.status.hired",
+};
+
+// `attachment.jobOffer` normally arrives populated (an object), but can be a
+// bare id string in edge cases -- this reads either shape the same way the
+// mobile ChatScreen reference implementation does.
+const getEntityId = (value: unknown): string => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object") return String((value as { _id?: string; id?: string })._id || (value as { id?: string }).id || "");
+  return String(value);
+};
+
+export function Messages() {
+  const { t } = useTranslation("worker");
+  const { t: tAdmin } = useTranslation("admin");
+  const { can } = useAdminPermissions();
+  const canBrowseRecipients = can('messages.recipients.view');
+  const { t: tc } = useTranslation("common");
+  const [cancelOfferId, setCancelOfferId] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const {
+    contacts,
+    archivedContacts,
+    blockedUsers,
+    realtimeStatus,
+    setContacts,
+    setArchivedContacts,
+    setBlockedUsers,
+    refreshConversations,
+    refreshArchived,
+    refreshBlocked,
+    markConversationRead,
+    subscribe,
+    emit,
+  } = useMessaging();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  useOfferExpiry(messages.map((message) => typeof message.attachment?.jobOffer === 'object' ? message.attachment.jobOffer : null));
+  const [messageText, setMessageText] = useState("");
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [isEditingSaving, setIsEditingSaving] = useState(false);
+  const [conversationFilter, setConversationFilter] = useState<"inbox" | "archived" | "blocked">("inbox");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [showListMenu, setShowListMenu] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [showRecipientDirectory, setShowRecipientDirectory] = useState(false);
+  const [reportTarget, setReportTarget] = useState<Contact | null>(null);
+  const reportTriggerRef = useRef<HTMLButtonElement>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Contact | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [peerTyping, setPeerTyping] = useState(false);
+  const [offerActionBusyId, setOfferActionBusyId] = useState<string | null>(null);
+  const [hireOfferId, setHireOfferId] = useState<string | null>(null);
+  const [offerConfirmAction, setOfferConfirmAction] = useState<{
+    title: string;
+    description: string;
+    confirmLabel?: string;
+    destructive?: boolean;
+    run: () => Promise<void>;
+  } | null>(null);
+  const prefersReducedMotion = useReducedMotion();
+  const currentUserId = user?.id || "";
+  // This same page is mounted for the worker, employer, AND admin routes
+  // (see App.tsx) -- the job-offer card's actions differ by which side of
+  // the offer the signed-in user is on, not by which route rendered it.
+  const isEmployerUser = checkIsEmployer(user);
+  const listMenuRef = useRef<HTMLDivElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const startChatHandledRef = useRef(false);
+  const startChatTargetRef = useRef('');
+  const prefilledDraftHandledRef = useRef(false);
+  const selectedContactRef = useRef<Contact | null>(null);
+  const selectionRequestRef = useRef(0);
+  const typingStopTimeoutRef = useRef<number | null>(null);
+  const typingActiveRef = useRef(false);
+  const peerTypingClearTimeoutRef = useRef<number | null>(null);
+  const supportSource = searchParams.get("source") || "";
+  const supportStartUserId = supportSource === "support-center" ? (searchParams.get("startUser") || "") : "";
+  const showArchived = conversationFilter === "archived";
+  const showBlocked = conversationFilter === "blocked";
+
+  const supportDisplayNameFor = useCallback((otherUserId: string, fallbackName: string) =>
+    supportStartUserId && String(otherUserId) === String(supportStartUserId)
+      ? t("messages.adminSupportName")
+      : fallbackName, [supportStartUserId, t]);
+
+  // MessagingContext is shared and i18n-free, so it stores whatever name the
+  // API or socket payload carried. Resolve display names here, where `t` and
+  // the Support-Center context exist: an admin thread reached from Support
+  // shows "Support Agent" rather than the staff member's real name, and a
+  // payload that arrived without a populated sender/receiver falls back to
+  // "User" instead of rendering a blank row.
+  const namedContacts = useMemo(
+    () => contacts.map((contact) => ({
+      ...contact,
+      otherUserName: supportDisplayNameFor(
+        contact.otherUserId,
+        contact.otherUserName || t("messages.userFallback"),
+      ),
+    })),
+    [contacts, supportDisplayNameFor, t],
+  );
+
+  useEffect(() => {
+    selectedContactRef.current = selectedContact;
+  }, [selectedContact]);
+
+  const handleSelectContact = useCallback(async (contact: Contact) => {
+    // Conversation loads can complete out of order. Record the intended
+    // contact synchronously so an older inbox/default request cannot replace
+    // a Support conversation with the first employer thread.
+    const requestId = selectionRequestRef.current + 1;
+    selectionRequestRef.current = requestId;
+    selectedContactRef.current = contact;
+    setSelectedContact(contact);
+    setShowMoreMenu(false);
+    markConversationRead(contact.conversationId);
+
+    try {
+      const response: any = await getConversationWithUser(contact.otherUserId, contact.jobId || undefined);
+      const messagesArray = pickArray<Message>(
+        response?.messages,
+        response?.data?.messages,
+        response?.meta?.messages,
+        response?.data,
+        response,
+      );
+      if (selectionRequestRef.current !== requestId) return;
+      setMessages(messagesArray);
+
+      if (messagesArray.length > 0) {
+        try {
+          await markMessagesAsRead(contact.otherUserId, contact.jobId || undefined);
+          window.dispatchEvent(new Event("messages-refresh"));
+        } catch {
+          // Reading a conversation still works when a read receipt cannot be recorded.
+        }
+      }
+    } catch (error: any) {
+      if (selectionRequestRef.current !== requestId) return;
+      console.error("Failed to load messages:", error);
+      toast.error(error.message || t("messages.toast.loadMessagesFailed"));
+      setMessages([]);
+    }
+  }, [t, markConversationRead]);
+
+  // Fetches the inbox and, if nothing is selected yet and the URL isn't
+  // steering toward a specific recipient (Support, a job inquiry), opens the
+  // first conversation. Uses the freshly fetched array rather than the
+  // `contacts` state to avoid a race with a same-tick selection from the URL
+  // effect below; `selectedContactRef` (not React state) is the guard because
+  // it updates synchronously.
+  const loadConversations = useCallback(async () => {
+    setLoading(true);
+    try {
+      const requestedStartUserId = searchParams.get("startUser");
+      const fetched = await refreshConversations();
+      if (fetched.length > 0 && !selectedContactRef.current && !requestedStartUserId) {
+        void handleSelectContact(fetched[0]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [refreshConversations, searchParams, handleSelectContact]);
+
+  useEffect(() => {
+    void refreshArchived();
+    void refreshBlocked();
+    void loadConversations();
+    // Intentionally re-runs only when the signed-in user changes, matching the
+    // page's original one-time-per-session load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUserId]);
+
+  // The shared socket connection lives in MessagingContext (one per user, not
+  // one per page, since leaving this route used to tear the connection down
+  // entirely). This effect only reacts to the events that affect the *open
+  // thread* — the conversation list itself is already kept in sync by the
+  // provider.
+  useEffect(() => {
+    if (!currentUserId) return;
+
+    const resyncOpenThread = () => {
+      const activeContact = selectedContactRef.current;
+      if (!activeContact) return;
+      void getConversationWithUser(activeContact.otherUserId, activeContact.jobId || undefined)
+        .then((response: any) => {
+          const synchronized = pickArray<Message>(
+            response?.messages,
+            response?.data?.messages,
+            response?.meta?.messages,
+            response?.data,
+            response,
+          );
+          setMessages(synchronized);
+        })
+        .catch(() => {
+          // The polling safety net retries transient reconnect failures.
+        });
+    };
+
+    const handleIncomingMessage = (message: any) => {
+      const senderId = String(message?.sender?._id || message?.sender || "");
+      const receiverId = String(message?.receiver?._id || message?.receiver || "");
+      const otherUserId = senderId === currentUserId ? receiverId : senderId;
+      const messageJobId = message?.job?._id || message?.job || null;
+      const activeContact = selectedContactRef.current;
+      const isCurrentConversation = Boolean(
+        activeContact &&
+        activeContact.otherUserId === otherUserId &&
+        (activeContact.jobId || "") === (messageJobId || ""),
+      );
+      const isFromSelf = senderId === currentUserId;
+      if (!isCurrentConversation) return;
+
+      setMessages((prev) => {
+        const normalizedId = String(message?._id || "");
+        if (normalizedId && prev.some((item) => item._id === normalizedId)) return prev;
+        const incomingClientId = message?.clientMessageId ? String(message.clientMessageId) : null;
+        if (incomingClientId) {
+          const optimisticIndex = prev.findIndex((item) => item.pending && item.clientMessageId === incomingClientId);
+          if (optimisticIndex !== -1) {
+            const next = [...prev];
+            next[optimisticIndex] = message as Message;
+            return next;
+          }
+        }
+        return [...prev, message as Message];
+      });
+      // The provider counts every inbound message as unread; this thread is on
+      // screen, so clear its badge rather than letting it tick up for a message
+      // the user is reading right now.
+      if (!isFromSelf) {
+        markConversationRead(activeContact!.conversationId);
+        void markMessagesAsRead(otherUserId, messageJobId || undefined).catch(() => undefined);
+      }
+      setPeerTyping(false);
+    };
+
+    const handleMessageEdited = (message: any) => {
+      if (!message?._id) return;
+      setMessages((prev) =>
+        prev.map((item) =>
+          item._id === message._id
+            ? {
+                ...item,
+                content: message.content,
+                isEdited: true,
+                editedAt: message.editedAt || new Date().toISOString(),
+              }
+            : item
+        )
+      );
+    };
+
+    const handleMessagesRead = (payload: any) => {
+      const readerId = String(payload?.readerId || "");
+      const activeContact = selectedContactRef.current;
+      if (!readerId || !activeContact || activeContact.otherUserId !== readerId) return;
+      const payloadJobId = payload?.jobId || null;
+      if ((activeContact.jobId || null) !== payloadJobId) return;
+      setMessages((prev) =>
+        prev.map((item) => (String(item.sender?._id) === currentUserId ? { ...item, read: true } : item)),
+      );
+    };
+
+    const handlePeerTyping = (payload: any) => {
+      const fromUserId = String(payload?.fromUserId || "");
+      const activeContact = selectedContactRef.current;
+      if (!activeContact || fromUserId !== activeContact.otherUserId) return;
+      const payloadJobId = payload?.jobId || null;
+      if ((activeContact.jobId || null) !== payloadJobId) return;
+
+      if (peerTypingClearTimeoutRef.current) window.clearTimeout(peerTypingClearTimeoutRef.current);
+      if (payload?.isTyping) {
+        setPeerTyping(true);
+        peerTypingClearTimeoutRef.current = window.setTimeout(() => setPeerTyping(false), TYPING_STALE_MS);
+      } else {
+        setPeerTyping(false);
+      }
+    };
+
+    const handleConversationDeleted = (payload: any) => {
+      const otherUserId = String(payload?.otherUserId || "");
+      if (!otherUserId) return;
+      const conversationId = conversationIdOf(otherUserId, payload?.jobId || null);
+      const activeContact = selectedContactRef.current;
+      if (activeContact?.conversationId === conversationId) {
+        selectedContactRef.current = null;
+        setSelectedContact(null);
+        setMessages([]);
+      }
+    };
+
+    const unsubscribers = [
+      subscribe("connect", resyncOpenThread),
+      subscribe("new_message", handleIncomingMessage),
+      subscribe("new_message_echo", handleIncomingMessage),
+      subscribe("message_edited", handleMessageEdited),
+      subscribe("messages_read", handleMessagesRead),
+      subscribe("peer_typing", handlePeerTyping),
+      subscribe("conversation_deleted", handleConversationDeleted),
+    ];
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [currentUserId, subscribe, markConversationRead]);
+
+  // A single, slower safety net for the open thread only — the conversation
+  // list has its own poll inside MessagingContext.
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (!selectedContact) return;
+      getConversationWithUser(selectedContact.otherUserId, selectedContact.jobId || undefined)
+        .then((response: any) => {
+          const messagesArray = pickArray<Message>(
+            response?.messages,
+            response?.data?.messages,
+            response?.meta?.messages,
+            response?.data,
+            response,
+          );
+          setMessages((prev) => {
+            const pendingOnly = prev.filter((item) => item.pending || item.failed);
+            return pendingOnly.length ? [...messagesArray, ...pendingOnly] : messagesArray;
+          });
+        })
+        .catch(() => {
+          // polling fallback only; ignore transient errors
+        });
+    }, 20000);
+    return () => window.clearInterval(interval);
+  }, [selectedContact]);
+
+  useEffect(() => {
+    // Keep message search local-only (do not persist to URL query string).
+    if (searchParams.has("q")) {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("q");
+      setSearchParams(nextParams, { replace: true });
+      return;
+    }
+
+    const contactId = searchParams.get("contact");
+    const startUserId = searchParams.get("startUser");
+    const startJobId = searchParams.get("jobId");
+    const startTarget = startUserId ? `${startUserId}::${startJobId || 'general'}` : '';
+    if (startTarget !== startChatTargetRef.current) {
+      startChatTargetRef.current = startTarget;
+      startChatHandledRef.current = false;
+      prefilledDraftHandledRef.current = false;
+    }
+    const startName = searchParams.get("startName") || t("messages.employerFallback");
+    const source = searchParams.get("source") || "";
+    const draft = searchParams.get("draft") || "";
+    const isFromJobDetails =
+      source === "job-details" ||
+      (Boolean(draft) && Boolean(startUserId) && Boolean(startJobId));
+
+    if (contactId && namedContacts.length > 0 && selectedContact?.conversationId !== contactId) {
+      const match = namedContacts.find((contact) => contact.conversationId === contactId);
+      if (match) {
+        startChatHandledRef.current = true;
+        handleSelectContact(match);
+        return;
+      }
+    }
+
+    if (!startChatHandledRef.current && startUserId) {
+      const fallbackConversationId = contactId || `${startUserId}::${startJobId || 'general'}`;
+      const fallbackContact: Contact = {
+        conversationId: fallbackConversationId,
+        otherUserId: startUserId,
+        otherUserName: supportDisplayNameFor(startUserId, startName),
+        jobId: startJobId || null,
+        jobTitle: null,
+        lastMessage: '',
+        lastMessageAt: new Date().toISOString(),
+      };
+
+      startChatHandledRef.current = true;
+      handleSelectContact(fallbackContact);
+
+      if (!contactId) {
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set("contact", fallbackConversationId);
+        setSearchParams(nextParams);
+      }
+    }
+
+    if (!prefilledDraftHandledRef.current && draft && isFromJobDetails) {
+      setMessageText(draft);
+      prefilledDraftHandledRef.current = true;
+
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("draft");
+      nextParams.delete("source");
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [searchParams, namedContacts, setSearchParams, supportDisplayNameFor, selectedContact?.conversationId, t, handleSelectContact]);
+
+  useEffect(() => {
+    // Close menu when clicking outside
+    const handleClickOutside = (event: MouseEvent) => {
+      if (listMenuRef.current && !listMenuRef.current.contains(event.target as Node)) {
+        setShowListMenu(false);
+      }
+      if (moreMenuRef.current && !moreMenuRef.current.contains(event.target as Node)) {
+        setShowMoreMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    // Scroll to bottom when messages change
+    messagesEndRef.current?.scrollIntoView({ behavior: prefersReducedMotion ? 'auto' : 'smooth' });
+  }, [messages, prefersReducedMotion]);
+
+  useEffect(() => {
+    // Auto-grow the composer up to a cap instead of a fixed 88px block.
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [messageText]);
+
+  useEffect(() => {
+    // Reset typing state and any pending timers when the open thread changes.
+    typingActiveRef.current = false;
+    setPeerTyping(false);
+    if (typingStopTimeoutRef.current) window.clearTimeout(typingStopTimeoutRef.current);
+    if (peerTypingClearTimeoutRef.current) window.clearTimeout(peerTypingClearTimeoutRef.current);
+  }, [selectedContact?.conversationId]);
+
+  const canEditMessage = (message: Message) => {
+    if (!currentUserId || message.sender._id !== currentUserId) return false;
+    const created = new Date(message.createdAt).getTime();
+    if (Number.isNaN(created)) return false;
+    return Date.now() - created <= 30 * 1000;
+  };
+
+  const beginEditMessage = (message: Message) => {
+    if (!canEditMessage(message)) {
+      toast.error(t("messages.toast.editWindowExpired"));
+      return;
+    }
+    setEditingMessageId(message._id);
+    setEditingText(message.content);
+  };
+
+  const cancelEditMessage = () => {
+    setEditingMessageId(null);
+    setEditingText("");
+  };
+
+  const saveEditMessage = async () => {
+    if (!editingMessageId) return;
+    const nextContent = editingText.trim();
+    if (!nextContent) {
+      toast.error(t("messages.toast.emptyMessage"));
+      return;
+    }
+
+    try {
+      setIsEditingSaving(true);
+      const response: any = await editMessage(editingMessageId, nextContent);
+      const updated = response?.data || response?.message || response;
+
+      setMessages((prev) =>
+        prev.map((item) =>
+          item._id === editingMessageId
+            ? {
+                ...item,
+                content: updated?.content || nextContent,
+                isEdited: true,
+                editedAt: updated?.editedAt || new Date().toISOString(),
+              }
+            : item
+        )
+      );
+
+      setEditingMessageId(null);
+      setEditingText("");
+      toast.success(t("messages.toast.messageUpdated"));
+    } catch (error: any) {
+      toast.error(error?.message || t("messages.toast.editFailed"));
+    } finally {
+      setIsEditingSaving(false);
+    }
+  };
+
+  const emitTyping = (isTyping: boolean) => {
+    if (!selectedContact) return;
+    emit('typing', {
+      toUserId: selectedContact.otherUserId,
+      jobId: selectedContact.jobId || null,
+      isTyping,
+    });
+  };
+
+  const handleComposerChange = (value: string) => {
+    setMessageText(value);
+    if (!selectedContact) return;
+
+    if (value.trim()) {
+      if (!typingActiveRef.current) {
+        typingActiveRef.current = true;
+        emitTyping(true);
+      }
+      if (typingStopTimeoutRef.current) window.clearTimeout(typingStopTimeoutRef.current);
+      typingStopTimeoutRef.current = window.setTimeout(() => {
+        typingActiveRef.current = false;
+        emitTyping(false);
+      }, TYPING_STOP_DELAY_MS);
+    } else if (typingActiveRef.current) {
+      typingActiveRef.current = false;
+      if (typingStopTimeoutRef.current) window.clearTimeout(typingStopTimeoutRef.current);
+      emitTyping(false);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    const trimmed = messageText.trim();
+    if (!trimmed || !selectedContact) return;
+
+    if (typingActiveRef.current) {
+      typingActiveRef.current = false;
+      if (typingStopTimeoutRef.current) window.clearTimeout(typingStopTimeoutRef.current);
+      emitTyping(false);
+    }
+
+    const clientMessageId = crypto.randomUUID();
+    const optimisticMessage: Message = {
+      _id: `pending-${clientMessageId}`,
+      sender: { _id: currentUserId },
+      receiver: { _id: selectedContact.otherUserId },
+      content: trimmed,
+      createdAt: new Date().toISOString(),
+      clientMessageId,
+      pending: true,
+      job: selectedContact.jobId ? { _id: selectedContact.jobId, title: selectedContact.jobTitle || "" } : undefined,
+    };
+    setMessages((prev) => [...prev, optimisticMessage]);
+    setMessageText("");
+
+    try {
+      setSending(true);
+      const response: any = await sendMessage({
+        receiverId: selectedContact.otherUserId,
+        content: trimmed,
+        jobId: selectedContact.jobId || undefined,
+        clientMessageId,
+      });
+      // The API response is authoritative if the socket is reconnecting. The
+      // echo can still arrive later and is deduplicated by message id.
+      const delivered = response?.data;
+      if (delivered?._id) {
+        setMessages((prev) => prev.map((item) =>
+          item.clientMessageId === clientMessageId ? delivered as Message : item
+        ));
+      }
+    } catch (error: any) {
+      setMessages((prev) =>
+        prev.map((item) => (item.clientMessageId === clientMessageId ? { ...item, pending: false, failed: true } : item)),
+      );
+      toast.error(error.message || t("messages.toast.sendFailed"));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const retryFailedMessage = (message: Message) => {
+    setMessages((prev) => prev.filter((item) => item._id !== message._id));
+    setMessageText(message.content);
+    composerRef.current?.focus();
+  };
+
+  const handleBlockUser = async () => {
+    if (!selectedContact) return;
+
+    if (!confirm(t("messages.confirm.blockUser", { name: selectedContact.otherUserName }))) {
+      return;
+    }
+
+    try {
+      await blockUser(selectedContact.otherUserId, selectedContact.jobId || undefined);
+      toast.success(t("messages.toast.blockedSuccess", { name: selectedContact.otherUserName }));
+      setShowMoreMenu(false);
+      setContacts((current) => current.filter((contact) => contact.conversationId !== selectedContact.conversationId));
+      selectedContactRef.current = null;
+      setSelectedContact(null);
+      setMessages([]);
+      setConversationFilter("archived");
+      await Promise.all([refreshArchived(), refreshBlocked()]);
+    } catch (error: any) {
+      toast.error(error.message || t("messages.toast.blockFailed"));
+    }
+  };
+
+  const handleArchiveConversation = async () => {
+    if (!selectedContact) return;
+
+    try {
+      await archiveConversation(selectedContact.otherUserId, selectedContact.jobId || undefined);
+      toast.success(t("messages.toast.archiveSuccess"));
+      setShowMoreMenu(false);
+
+      const archivedConversationId = `${selectedContact.otherUserId}::${selectedContact.jobId || "general"}`;
+      setContacts((prev) => prev.filter((contact) => contact.conversationId !== archivedConversationId));
+
+      await refreshArchived();
+
+      // Remove from contacts list and reload
+      await loadConversations();
+      setSelectedContact(null);
+      setMessages([]);
+    } catch (error: any) {
+      toast.error(error.message || t("messages.toast.archiveFailed"));
+    }
+  };
+
+  const handleUnarchiveConversation = async () => {
+    if (!selectedContact) return;
+
+    try {
+      await archiveConversation(selectedContact.otherUserId, selectedContact.jobId || undefined, false);
+      toast.success(t("messages.toast.unarchiveSuccess"));
+      setShowMoreMenu(false);
+
+      const conversationId = `${selectedContact.otherUserId}::${selectedContact.jobId || "general"}`;
+      setArchivedContacts((prev) => prev.filter((contact) => contact.conversationId !== conversationId));
+      await loadConversations();
+      await refreshArchived();
+      setConversationFilter("inbox");
+    } catch (error: any) {
+      toast.error(error.message || t("messages.toast.unarchiveFailed"));
+    }
+  };
+
+  const openDeleteConfirmation = () => {
+    if (!selectedContact) return;
+    setDeleteTarget(selectedContact);
+    setShowMoreMenu(false);
+  };
+
+  const handleDeleteConversation = async () => {
+    if (!deleteTarget || isDeleting) return;
+
+    try {
+      setIsDeleting(true);
+      await deleteConversation(deleteTarget.otherUserId, deleteTarget.jobId || undefined);
+      toast.success(t("messages.toast.deleteSuccess"));
+      // Permanent deletion removes this exact job/general thread from both
+      // participants, including its archived copy and every message record.
+      setContacts((current) => current.filter((contact) => contact.conversationId !== deleteTarget.conversationId));
+      setArchivedContacts((current) => current.filter((contact) => contact.conversationId !== deleteTarget.conversationId));
+      selectedContactRef.current = null;
+      setSelectedContact(null);
+      setMessages([]);
+      setConversationFilter("inbox");
+      setDeleteTarget(null);
+    } catch (error: any) {
+      toast.error(error.message || t("messages.toast.deleteFailed"));
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const setConversationListFilter = async (next: "inbox" | "archived" | "blocked") => {
+    setConversationFilter(next);
+    setShowListMenu(false);
+    if (next === "archived" || next === "blocked") {
+      await refreshArchived();
+    }
+    if (next === "blocked") {
+      await refreshBlocked();
+    }
+    selectedContactRef.current = null;
+    setSelectedContact(null);
+    setMessages([]);
+    setShowMoreMenu(false);
+  };
+
+  const handleUnblockUser = async () => {
+    if (!selectedContact) return;
+    try {
+      await unblockUser(selectedContact.otherUserId);
+      setBlockedUsers((current) => current.filter((user) => String(user.id || user._id || "") !== selectedContact.otherUserId));
+      selectedContactRef.current = null;
+      setSelectedContact(null);
+      setMessages([]);
+      setShowMoreMenu(false);
+      toast.success(`${selectedContact.otherUserName} unblocked.`);
+    } catch (error: any) {
+      toast.error(error.message || "Could not unblock this user.");
+    }
+  };
+
+  // Re-fetches the open thread after an offer action so the card's status
+  // pill/buttons reflect the server's new state. Cheaper than reasoning
+  // about how to patch a nested populated `attachment.jobOffer` by hand,
+  // and matches the mobile reference (`ChatScreen.tsx`'s `fetchMessages()`
+  // after `updateOffer`).
+  const refreshOpenThreadMessages = async () => {
+    if (!selectedContact) return;
+    try {
+      const response: any = await getConversationWithUser(selectedContact.otherUserId, selectedContact.jobId || undefined);
+      const messagesArray = pickArray<Message>(
+        response?.messages,
+        response?.data?.messages,
+        response?.meta?.messages,
+        response?.data,
+        response,
+      );
+      setMessages(messagesArray);
+    } catch {
+      // The socket echo / poll safety net still catches up.
+    }
+  };
+
+  const runOfferAction = async (offerId: string, action: () => Promise<unknown>, successMessage?: string) => {
+    setOfferActionBusyId(offerId);
+    try {
+      await action();
+      await refreshOpenThreadMessages();
+      if (successMessage) toast.success(successMessage);
+    } catch (error: any) {
+      toast.error(error?.message || t("messages.offerCard.toast.actionFailed"));
+    } finally {
+      setOfferActionBusyId(null);
+    }
+  };
+
+  const openAcceptOfferConfirm = (offerId: string, amount: number) => {
+    setOfferConfirmAction({
+      title: t("messages.offerCard.confirmAccept.title"),
+      description: `${t("messages.offerCard.confirmAccept.description", { amount: formatCurrency(amount) })} ${tc("lifecycle.terms")}`,
+      confirmLabel: t("messages.offerCard.confirmAccept.confirm"),
+      run: () => runOfferAction(offerId, () => respondToJobOffer(offerId, "accept"), t("messages.offerCard.toast.accepted")),
+    });
+  };
+
+  const openDeclineOfferConfirm = (offerId: string, amount: number) => {
+    setOfferConfirmAction({
+      title: t("messages.offerCard.confirmDecline.title"),
+      description: t("messages.offerCard.confirmDecline.description", { amount: formatCurrency(amount) }),
+      destructive: true,
+      confirmLabel: t("messages.offerCard.confirmDecline.confirm"),
+      run: () => runOfferAction(offerId, () => respondToJobOffer(offerId, "reject"), t("messages.offerCard.toast.declined")),
+    });
+  };
+
+  const openCancelOfferConfirm = (offerId: string) => setCancelOfferId(offerId);
+
+  const openConfirmHireConfirm = (offerId: string) => {
+    setHireOfferId(offerId);
+  };
+
+  const handleOfferConfirmDialogConfirm = () => {
+    if (!offerConfirmAction) return;
+    const action = offerConfirmAction;
+    setOfferConfirmAction(null);
+    void action.run();
+  };
+
+  const canViewSelectedProfile =
+    Boolean(selectedContact?.otherUserId) && !isStaffConversation(selectedContact, supportStartUserId);
+
+  const handleViewProfile = () => {
+    if (!selectedContact?.otherUserId) return;
+    // Admin/Support has no public profile, so never navigate there.
+    if (!canViewSelectedProfile) return;
+    setShowMoreMenu(false);
+    navigate(`${ROUTES.publicProfile(selectedContact.otherUserId)}?viewAs=worker`);
+  };
+
+  // Ensure contacts is always an array before filtering
+  const archivedSet = useMemo(
+    () => new Set(archivedContacts.map((contact) => contact.conversationId)),
+    [archivedContacts],
+  );
+  const blockedUserIdSet = useMemo(
+    () => new Set(blockedUsers.map((user) => String(user.id || user._id || "")).filter(Boolean)),
+    [blockedUsers],
+  );
+  const blockedContacts = useMemo(() => {
+    const archivedBlocked = archivedContacts.filter((contact) => blockedUserIdSet.has(contact.otherUserId));
+    const existingIds = new Set(archivedBlocked.map((contact) => contact.otherUserId));
+    const missingContacts = blockedUsers
+      .map((user): Contact | null => {
+        const otherUserId = String(user.id || user._id || "");
+        if (!otherUserId || existingIds.has(otherUserId)) return null;
+        const otherUserName = `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email || t("messages.userFallback");
+        return {
+          conversationId: `${otherUserId}::general`,
+          otherUserId,
+          otherUserName,
+          jobId: null,
+          jobTitle: null,
+          lastMessage: "",
+          lastMessageAt: new Date(0).toISOString(),
+        };
+      })
+      .filter((contact): contact is Contact => Boolean(contact));
+    return [...archivedBlocked, ...missingContacts];
+  }, [archivedContacts, blockedUserIdSet, blockedUsers, t]);
+  const contactsArray = useMemo(
+    () =>
+      showBlocked
+        ? blockedContacts
+        : showArchived
+          ? archivedContacts
+          : namedContacts.filter((contact) => !archivedSet.has(contact.conversationId)),
+    [archivedContacts, archivedSet, blockedContacts, namedContacts, showArchived, showBlocked],
+  );
+  const canInjectSelectedContact =
+    selectedContact &&
+    !contactsArray.some((contact) => contact.conversationId === selectedContact.conversationId) &&
+    (showBlocked
+      ? blockedUserIdSet.has(selectedContact.otherUserId)
+      : showArchived
+        ? archivedSet.has(selectedContact.conversationId)
+        : !archivedSet.has(selectedContact.conversationId));
+  const effectiveContacts = useMemo(
+    () => (canInjectSelectedContact ? [selectedContact as Contact, ...contactsArray] : contactsArray),
+    [canInjectSelectedContact, contactsArray, selectedContact],
+  );
+
+  const unreadTotal = useMemo(
+    () => contacts.reduce((sum, contact) => sum + (contact.unreadCount || 0), 0),
+    [contacts],
+  );
+
+  const filteredContacts = useMemo(
+    () =>
+      effectiveContacts
+        .filter(
+          (contact) =>
+            contact.otherUserName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            (contact.jobTitle && contact.jobTitle.toLowerCase().includes(searchQuery.toLowerCase()))
+        )
+        .sort((a, b) => {
+          const aTime = new Date(a.lastMessageAt).getTime() || 0;
+          const bTime = new Date(b.lastMessageAt).getTime() || 0;
+          return bTime - aTime;
+        }),
+    [effectiveContacts, searchQuery]
+  );
+
+  const orderedMessages = useMemo(
+    () =>
+      [...messages].sort((a, b) => {
+        const aTime = new Date(a.createdAt).getTime() || 0;
+        const bTime = new Date(b.createdAt).getTime() || 0;
+        return aTime - bTime;
+      }),
+    [messages]
+  );
+
+  const lastOwnMessageId = useMemo(() => {
+    for (let i = orderedMessages.length - 1; i >= 0; i -= 1) {
+      if (currentUserId && orderedMessages[i].sender._id === currentUserId && !orderedMessages[i].pending) {
+        return orderedMessages[i]._id;
+      }
+    }
+    return null;
+  }, [orderedMessages, currentUserId]);
+
+  const messageRows = useMemo(() => {
+    const rows: Array<
+      | { type: "divider"; label: string }
+      | { type: "message"; message: Message; showMeta: boolean }
+    > = [];
+    let previousDay = "";
+    let previousMessage: Message | null = null;
+
+    orderedMessages.forEach((message) => {
+      const currentDay = new Date(message.createdAt).toDateString();
+      if (currentDay !== previousDay) {
+        rows.push({ type: "divider", label: formatMessageDay(t, message.createdAt) });
+        previousDay = currentDay;
+        previousMessage = null;
+      }
+
+      const sameSender = previousMessage?.sender._id === message.sender._id;
+      const withinWindow =
+        previousMessage != null &&
+        Math.abs(new Date(message.createdAt).getTime() - new Date(previousMessage.createdAt).getTime()) < GROUP_WINDOW_MS;
+      rows.push({ type: "message", message, showMeta: !(sameSender && withinWindow) });
+      previousMessage = message;
+    });
+
+    return rows;
+  }, [orderedMessages, t]);
+
+  if (loading) {
+    return (
+      <div className="mx-auto h-[calc(100dvh-120px)] min-h-[28rem] max-w-[1341px] pt-1 lg:h-[calc(100dvh-160px)]">
+        <div className="flex h-full overflow-hidden rounded-card border border-slate-200 bg-white shadow-sm">
+          <div className="flex w-full flex-col border-r border-slate-100 md:w-[34%] md:min-w-[320px] md:max-w-[460px]">
+            <div className="space-y-3 border-b border-slate-100 p-4">
+              <Skeleton className="h-7 w-32" />
+              <Skeleton className="h-11 w-full rounded-full" />
+            </div>
+            <div className="space-y-3 p-4">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <Skeleton className="h-12 w-12 shrink-0 rounded-full" />
+                  <div className="flex-1 space-y-2">
+                    <Skeleton className="h-3.5 w-1/2" />
+                    <Skeleton className="h-3 w-3/4" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="hidden flex-1 items-center justify-center md:flex">
+            <div className="h-10 w-10 animate-spin rounded-full border-4 border-brand border-t-transparent" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const selectDirectoryRecipient = (recipient: MessageRecipient) => {
+    const conversationId = conversationIdOf(recipient.id);
+    const existing = namedContacts.find((contact) => contact.conversationId === conversationId);
+    const contact: Contact = existing ? { ...existing, otherUserName: recipient.name, otherUserIsStaff: recipient.isStaff } : {
+      conversationId,
+      otherUserId: recipient.id,
+      otherUserName: recipient.name,
+      otherUserIsStaff: recipient.isStaff,
+      jobId: null,
+      jobTitle: null,
+      lastMessage: "",
+      lastMessageAt: new Date().toISOString(),
+      unreadCount: 0,
+    };
+    startChatHandledRef.current = true;
+    setShowRecipientDirectory(false);
+    setConversationFilter("inbox");
+    setSearchQuery("");
+    setMessageText("");
+    setMessages([]);
+    setEditingMessageId(null);
+    setEditingText("");
+    setSearchParams({ contact: conversationId });
+    void handleSelectContact(contact);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  };
+
+  return (
+    <div className="mx-auto h-[calc(100dvh-120px)] min-h-[28rem] max-w-[1341px] pt-1 lg:h-[calc(100dvh-160px)]">
+      <div className="flex h-full overflow-hidden rounded-card border border-slate-200 bg-white shadow-sm">
+        <div className={`${selectedContact ? "hidden md:flex" : "flex"} w-full min-w-0 flex-col border-r border-slate-100 bg-white md:w-[34%] md:min-w-[320px] md:max-w-[460px]`}>
+          <div className="border-b border-slate-100 px-4 py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <h1 className="ui-page-title text-[22px]">{t("messages.title")}</h1>
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    realtimeStatus === "live"
+                      ? "bg-emerald-500"
+                      : realtimeStatus === "offline"
+                        ? "bg-rose-500"
+                        : "bg-amber-400"
+                  }`}
+                  title={realtimeStatus === "live" ? "Live updates connected" : "Live updates reconnecting"}
+                  aria-label={realtimeStatus === "live" ? "Live updates connected" : "Live updates reconnecting"}
+                />
+                {unreadTotal > 0 ? (
+                  <span className="rounded-full bg-brand px-2.5 py-0.5 text-caption font-semibold text-white">
+                    {unreadTotal}
+                  </span>
+                ) : null}
+              </div>
+              <div className="relative" ref={listMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowListMenu((prev) => !prev)}
+                  className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:bg-slate-50"
+                  title={t("messages.listOptionsLabel")}
+                  aria-label={t("messages.listOptionsLabel")}
+                  aria-expanded={showListMenu}
+                >
+                  <Ellipsis className="h-4 w-4" />
+                </button>
+                <AnimatePresence>
+                  {showListMenu ? (
+                    <motion.div
+                      initial={prefersReducedMotion ? false : { opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={prefersReducedMotion ? undefined : { opacity: 0, y: -4 }}
+                      transition={{ duration: prefersReducedMotion ? 0 : 0.15 }}
+                      className="absolute right-0 top-full z-50 mt-2 w-52 rounded-xl border border-slate-200 bg-white py-2 shadow-lg"
+                    >
+                      <button type="button" onClick={() => void setConversationListFilter("inbox")} className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-slate-700 hover:bg-slate-50">
+                        <MessagesSquare className="h-4 w-4" />
+                        Inbox
+                      </button>
+                      <button type="button" onClick={() => void setConversationListFilter("archived")} className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-slate-700 hover:bg-slate-50">
+                        <Archive className="h-4 w-4" />
+                        {t("messages.viewArchived")}
+                      </button>
+                      <button type="button" onClick={() => void setConversationListFilter("blocked")} className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-slate-700 hover:bg-slate-50">
+                        <Ban className="h-4 w-4" />
+                        Blocked
+                      </button>
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+              </div>
+            </div>
+
+            <div className="relative mt-4">
+              <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder={t("messages.searchPlaceholder")}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                aria-label={t("messages.searchAria")}
+                className="w-full rounded-full border border-slate-200 bg-white py-3 pl-11 pr-4 text-body text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </div>
+            {canBrowseRecipients ? (
+              <button type="button" onClick={() => setShowRecipientDirectory(true)} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-white transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2">
+                <SquarePen className="h-4 w-4" aria-hidden="true" />{tAdmin("messageDirectory.newMessage")}
+              </button>
+            ) : null}
+          </div>
+
+          <div className="flex-1 overflow-y-auto bg-white">
+            {filteredContacts.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-100">
+                  <MessagesSquare className="h-6 w-6 text-slate-400" />
+                </div>
+                <p className="text-[15px] font-medium text-slate-500">
+                  {showBlocked ? "No blocked conversations." : showArchived ? t("messages.emptyArchived") : t("messages.emptyInbox")}
+                </p>
+              </div>
+            ) : (
+              filteredContacts.map((contact, index) => {
+                const isActive = selectedContact?.conversationId === contact.conversationId;
+                const hasUnread = (contact.unreadCount || 0) > 0;
+                return (
+                  <motion.button
+                    key={contact.conversationId}
+                    type="button"
+                    initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: Math.min(index, 8) * 0.03, duration: seconds(motionTokens.duration.fast) }}
+                    onClick={() => {
+                      handleSelectContact(contact);
+                      setShowListMenu(false);
+                      const nextParams = new URLSearchParams(searchParams);
+                      nextParams.set("contact", contact.conversationId);
+                      setSearchParams(nextParams);
+                    }}
+                    className={`w-full border-b border-slate-50 px-4 py-4 text-left transition hover:bg-slate-50 ${
+                      isActive ? "bg-[#EAF2FD]" : "bg-white"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <span className={`mt-4 h-2 w-2 flex-shrink-0 rounded-full ${hasUnread ? "bg-brand" : ""}`} />
+                      <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-brand text-body font-bold text-white">
+                        {getInitials(contact.otherUserName)}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start justify-between gap-2">
+                          <p className={`truncate text-[15px] leading-tight text-slate-900 ${hasUnread ? "font-bold" : "font-semibold"}`}>
+                            {contact.otherUserName}
+                          </p>
+                          <span className="whitespace-nowrap text-caption text-slate-400">
+                            {formatTime(t, contact.lastMessageAt)}
+                          </span>
+                        </div>
+                        {contact.jobTitle ? (
+                          <p className="mt-0.5 truncate text-caption text-slate-400">{t("messages.reJob", { jobTitle: contact.jobTitle })}</p>
+                        ) : null}
+                        <p className={`mt-1 line-clamp-2 text-body-sm ${hasUnread ? "font-medium text-slate-700" : "text-slate-500"}`}>
+                          {contact.lastMessage || t("messages.noMessagesPreview")}
+                        </p>
+                      </div>
+                    </div>
+                  </motion.button>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        <div className={`${selectedContact ? "flex" : "hidden md:flex"} min-w-0 flex-1 flex-col bg-[#F9FAFC]`}>
+          {!selectedContact ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-100">
+                <MessagesSquare className="h-7 w-7 text-slate-400" />
+              </div>
+              <p className="text-[15px] font-medium text-slate-500">{t("messages.noConversationSelected")}</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-4 border-b border-slate-100 bg-white px-5 py-4">
+                <div className="flex min-w-0 items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedContact(null);
+                      setMessages([]);
+                      setShowMoreMenu(false);
+                    }}
+                    className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:bg-slate-50 md:hidden"
+                    title={t("messages.back")}
+                    aria-label={t("messages.backAria")}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleViewProfile}
+                    disabled={!canViewSelectedProfile}
+                    aria-label={t("messages.viewProfileAria", { name: selectedContact.otherUserName })}
+                    title={canViewSelectedProfile ? t("messages.viewProfile") : undefined}
+                    className="flex min-w-0 items-center gap-3 rounded-xl text-left transition enabled:hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 disabled:cursor-default"
+                  >
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-brand text-body font-bold text-white">
+                      {getInitials(selectedContact.otherUserName)}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-[16px] font-semibold text-slate-900">{selectedContact.otherUserName}</span>
+                      {peerTyping ? (
+                        <span className="block text-body-sm font-medium text-brand">{t("messages.typing")}</span>
+                      ) : selectedContact.jobTitle ? (
+                        <span className="block truncate text-body-sm text-slate-400">{t("messages.reJob", { jobTitle: selectedContact.jobTitle })}</span>
+                      ) : null}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="relative" ref={moreMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setShowMoreMenu((prev) => !prev)}
+                    ref={reportTriggerRef}
+                    className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:bg-slate-50"
+                    title={t("messages.moreOptions")}
+                    aria-label={t("messages.moreOptionsAria")}
+                    aria-expanded={showMoreMenu}
+                  >
+                    <MoreVertical className="h-4 w-4" />
+                  </button>
+                  <AnimatePresence>
+                    {showMoreMenu ? (
+                      <motion.div
+                        initial={prefersReducedMotion ? false : { opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={prefersReducedMotion ? undefined : { opacity: 0, y: -4 }}
+                        transition={{ duration: prefersReducedMotion ? 0 : 0.15 }}
+                        className="absolute right-0 top-full z-50 mt-2 w-52 rounded-xl border border-slate-200 bg-white py-2 shadow-lg"
+                      >
+                        {showBlocked ? (
+                          <button
+                            type="button"
+                            onClick={handleUnblockUser}
+                            className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-[#047857] hover:bg-emerald-50"
+                          >
+                            <Check className="h-4 w-4" />
+                            Unblock user
+                          </button>
+                        ) : showArchived ? (
+                          <button
+                            type="button"
+                            onClick={handleUnarchiveConversation}
+                            className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-slate-700 hover:bg-slate-50"
+                          >
+                            <Archive className="h-4 w-4" />
+                            {t("messages.unarchive")}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleArchiveConversation}
+                            className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-slate-700 hover:bg-slate-50"
+                          >
+                            <Archive className="h-4 w-4" />
+                            {t("messages.archive")}
+                          </button>
+                        )}
+                        {canViewSelectedProfile ? (
+                          <button
+                            type="button"
+                            onClick={handleViewProfile}
+                            className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-slate-700 hover:bg-slate-50"
+                          >
+                            {t("messages.viewProfile")}
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => { setReportTarget(selectedContact); setShowMoreMenu(false); }}
+                          className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-amber-800 hover:bg-amber-50"
+                        >
+                          <Flag className="h-4 w-4" aria-hidden="true" />
+                          {t("messages.report.action")}
+                        </button>
+                        {!showBlocked ? (
+                          <button
+                            type="button"
+                            onClick={handleBlockUser}
+                            className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-red-600 hover:bg-red-50"
+                          >
+                            <Ban className="h-4 w-4" />
+                            {t("messages.blockUser")}
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={openDeleteConfirmation}
+                          className="flex w-full items-center gap-3 px-4 py-2 text-left text-body text-red-600 hover:bg-red-50"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                          {t("messages.deleteConversation")}
+                        </button>
+                      </motion.div>
+                    ) : null}
+                  </AnimatePresence>
+                </div>
+              </div>
+
+              <MessagingSafetyNotice />
+              <div className="min-h-0 flex-1 overflow-y-auto bg-[#F8FAFD] px-5 py-5">
+                {orderedMessages.length === 0 ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white shadow-sm">
+                      <MessagesSquare className="h-6 w-6 text-slate-400" />
+                    </div>
+                    <p className="text-body font-medium text-slate-500">{t("messages.noMessagesYet")}</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {messageRows.map((row, index) => {
+                      if (row.type === "divider") {
+                        return (
+                          <div key={`divider-${index}`} className="py-2">
+                            <div className="mx-auto w-full max-w-[420px] rounded-full border border-slate-200 bg-white px-3 py-1 text-center text-caption font-medium text-slate-500">
+                              {row.label}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      const message = row.message;
+                      const isOwn = Boolean(currentUserId && message.sender._id === currentUserId);
+                      const isEditing = editingMessageId === message._id;
+                      const isLastOwn = message._id === lastOwnMessageId;
+                      if (message.attachment?.type === 'hire_checklist') return <div key={message._id} className={`flex py-2 ${isOwn ? 'justify-end' : 'justify-start'}`}><div className="w-full max-w-sm rounded-card border border-slate-200 bg-white p-4 text-slate-900"><p className="mb-2 font-semibold">{message.attachment.jobTitle}</p><ChecklistTable items={message.attachment.checklist || []} /></div></div>;
+                      if (message.attachment?.type === 'completion_evidence') return <div key={message._id} className={`flex py-2 ${isOwn ? 'justify-end' : 'justify-start'}`}><CompletionMessageCard message={message} /></div>;
+
+                      // A job offer arrives as a normal message with a
+                      // structured `attachment` instead of freeform text --
+                      // see server/controllers/JobOfferController.js:44. Only
+                      // the employer ever sends one, so `isOwn` here doubles
+                      // as "I am the employer who sent this offer".
+                      const offerId = getEntityId(message.attachment?.jobOffer);
+                      const isJobOfferMessage = message.attachment?.type === "job_offer" && Boolean(offerId);
+                      if (isJobOfferMessage) {
+                        const offerValue = message.attachment?.jobOffer;
+                        const offerStatus = String(
+                          typeof offerValue === "object" ? offerResponseStatus(offerValue) || "pending" : "pending",
+                        ).toLowerCase();
+                        const offerAmount = message.attachment?.offerAmount ?? 0;
+                        const offerBusy = offerActionBusyId === offerId;
+                        const showWorkerActions = !isEmployerUser && !isOwn && offerStatus === "pending";
+                        const showEmployerActions = isEmployerUser && isOwn && ["pending", "accepted"].includes(offerStatus);
+
+                        return (
+                          <motion.div
+                            key={message._id || `message-${index}`}
+                            initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: seconds(motionTokens.duration.fast) }}
+                            className={`flex gap-3 ${isOwn ? "justify-end" : "justify-start"} ${row.showMeta ? "mt-3" : "mt-0.5"}`}
+                          >
+                            {!isOwn ? (
+                              <div className="w-10 shrink-0">
+                                {row.showMeta ? (
+                                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-brand text-caption font-bold text-white">
+                                    {getInitials(selectedContact.otherUserName)}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+                            <div className={`flex max-w-[78%] flex-col ${isOwn ? "items-end" : "items-start"}`}>
+                              {row.showMeta ? (
+                                <div className="mb-1 flex items-center gap-2 text-caption text-slate-400">
+                                  {!isOwn ? <span className="font-semibold text-slate-700">{selectedContact.otherUserName}</span> : null}
+                                  <span>{formatMessageTime(message.createdAt)}</span>
+                                </div>
+                              ) : null}
+                              {/* The `min-w-[260px]` this replaces beat the
+                                  `max-w-[78%]` on the bubble column, so the
+                                  offer card pushed out of the thread on any
+                                  phone at or below 360px wide. The row inside
+                                  already has a `min-w-0` child and a truncating
+                                  title, so it degrades on its own. */}
+                              <div className={`w-full rounded-card border p-4 sm:min-w-[260px] ${isOwn ? "border-[#BFDBFE] bg-[#EAF2FC]" : "border-slate-200 bg-white"}`}>
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-brand">
+                                      {t("messages.offerCard.eyebrow")}
+                                    </p>
+                                    <p className="mt-0.5 truncate text-body font-semibold text-slate-900">
+                                      {message.attachment?.jobTitle || t("messages.offerCard.fallbackTitle")}
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase ${
+                                      offerStatus === "pending" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"
+                                    }`}
+                                  >
+                                    {offerStatus === 'expired' ? t('offerResponse.expiredStatus', { ns: 'common' }) : t(OFFER_STATUS_LABEL_KEYS[offerStatus] || OFFER_STATUS_LABEL_KEYS.pending)}
+                                  </span>
+                                </div>
+                                <div className="mt-3 border-t border-slate-200/70 pt-3">
+                                  <p className="text-[18px] font-bold text-slate-900">{formatCurrency(offerAmount)}</p>
+                                  <DailyOfferSchedule message={message} />
+                                  <p className="mt-0.5 text-caption text-slate-500">{t("messages.offerCard.escrowHint")}</p>
+                                </div>
+                                <OfferResponseDeadline offer={typeof offerValue === 'object' ? offerValue : null} />
+                                {showWorkerActions ? (
+                                  <div className="mt-3 flex gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={offerBusy}
+                                      onClick={() => openDeclineOfferConfirm(offerId, offerAmount)}
+                                      className="inline-flex h-9 flex-1 items-center justify-center rounded-control border border-red-200 px-3 text-caption font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {t("messages.offerCard.decline")}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={offerBusy}
+                                      onClick={() => openAcceptOfferConfirm(offerId, offerAmount)}
+                                      className="inline-flex h-9 flex-1 items-center justify-center rounded-control bg-brand px-3 text-caption font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {t("messages.offerCard.accept")}
+                                    </button>
+                                  </div>
+                                ) : null}
+                                {showEmployerActions ? (
+                                  <div className="mt-3 flex gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={offerBusy}
+                                      onClick={() => openCancelOfferConfirm(offerId)}
+                                      className="inline-flex h-9 flex-1 items-center justify-center rounded-control border border-[#FECACA] px-3 text-caption font-semibold text-[#B91C1C] transition hover:bg-[#FEF2F2] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {t("messages.offerCard.cancel")}
+                                    </button>
+                                    {offerStatus === "accepted" ? (
+                                      <button
+                                        type="button"
+                                        disabled={offerBusy}
+                                        onClick={() => openConfirmHireConfirm(offerId)}
+                                        className="inline-flex h-9 flex-1 items-center justify-center rounded-control bg-brand px-3 text-caption font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        {t("messages.offerCard.confirmHire")}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          </motion.div>
+                        );
+                      }
+
+                      return (
+                        <motion.div
+                          key={message._id || `message-${index}`}
+                          initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: seconds(motionTokens.duration.fast) }}
+                          className={`flex gap-3 ${isOwn ? "justify-end" : "justify-start"} ${row.showMeta ? "mt-3" : "mt-0.5"}`}
+                        >
+                          {!isOwn ? (
+                            <div className="w-10 shrink-0">
+                              {row.showMeta ? (
+                                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-brand text-caption font-bold text-white">
+                                  {getInitials(selectedContact.otherUserName)}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          <div className={`flex max-w-[78%] flex-col ${isOwn ? "items-end" : "items-start"}`}>
+                            {row.showMeta ? (
+                              <div className={`mb-1 flex items-center gap-2 text-caption text-slate-400 ${isOwn ? "" : ""}`}>
+                                {!isOwn ? <span className="font-semibold text-slate-700">{selectedContact.otherUserName}</span> : null}
+                                <span>{formatMessageTime(message.createdAt)}</span>
+                              </div>
+                            ) : null}
+                            <button
+                              type="button"
+                              disabled={!message.failed}
+                              onClick={() => message.failed && retryFailedMessage(message)}
+                              className={`rounded-card px-4 py-3 text-left transition ${
+                                isOwn
+                                  ? message.failed
+                                    ? "border border-red-300 bg-red-50 text-red-700"
+                                    : "bg-brand text-white"
+                                  : "border border-slate-200 bg-white text-slate-900"
+                              } ${message.pending ? "opacity-60" : ""} ${message.failed ? "cursor-pointer" : "cursor-default"}`}
+                            >
+                              {isEditing ? (
+                                // The failed-only retry handler above is disabled whenever isEditing is
+                                // true (edit only applies to persisted, non-failed messages), so clicks
+                                // inside here never reach it — no stopPropagation needed.
+                                <div className="space-y-2">
+                                  <input
+                                    type="text"
+                                    value={editingText}
+                                    onChange={(e) => setEditingText(e.target.value)}
+                                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-body text-slate-900"
+                                    disabled={isEditingSaving}
+                                  />
+                                  <div className="flex justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={cancelEditMessage}
+                                      className="rounded bg-slate-200 px-2 py-1 text-caption text-slate-700"
+                                      disabled={isEditingSaving}
+                                    >
+                                      {t("messages.editing.cancel")}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={saveEditMessage}
+                                      className="rounded bg-brand px-2 py-1 text-caption text-white"
+                                      disabled={isEditingSaving}
+                                    >
+                                      {t("messages.editing.save")}
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="text-body leading-relaxed">{message.content}</p>
+                              )}
+                            </button>
+                            <div className={`mt-1 flex items-center gap-2 text-[11px] text-slate-400 ${isOwn ? "justify-end" : "justify-start"}`}>
+                              {message.failed ? (
+                                <span className="font-medium text-red-600">{t("messages.failedToSend")}</span>
+                              ) : message.pending ? (
+                                <span>{t("messages.sending")}</span>
+                              ) : (
+                                <>
+                                  {message.isEdited ? <span>{t("messages.edited")}</span> : null}
+                                  {isOwn && !isEditing && canEditMessage(message) ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => beginEditMessage(message)}
+                                      className="font-medium text-brand hover:underline"
+                                    >
+                                      {t("messages.edit")}
+                                    </button>
+                                  ) : null}
+                                  {isOwn && isLastOwn ? (
+                                    message.read ? (
+                                      <span className="flex items-center gap-0.5 text-brand">
+                                        <CheckCheck className="h-3.5 w-3.5" /> {t("messages.read")}
+                                      </span>
+                                    ) : (
+                                      <span className="flex items-center gap-0.5">
+                                        <Check className="h-3.5 w-3.5" /> {t("messages.sent")}
+                                      </span>
+                                    )
+                                  ) : null}
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </motion.div>
+                      );
+                    })}
+                    <div ref={messagesEndRef} />
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t border-slate-100 bg-white px-5 py-4">
+                <div className="flex items-end gap-3">
+                  <textarea
+                    ref={composerRef}
+                    placeholder={t("messages.composerPlaceholder")}
+                    value={messageText}
+                    onChange={(e) => handleComposerChange(e.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        if (!sending) {
+                          handleSendMessage();
+                        }
+                      }
+                    }}
+                    disabled={sending}
+                    maxLength={4000}
+                    rows={1}
+                    aria-label={t("messages.composerAria")}
+                    className="min-h-[44px] max-h-40 flex-1 resize-none rounded-card border border-slate-200 bg-slate-50 px-4 py-3 text-[15px] text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:opacity-60"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSendMessage}
+                    disabled={!messageText.trim() || sending}
+                    aria-label={t("messages.sendAria")}
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-brand text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {sending ? (
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    ) : (
+                      <Send className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      <AnimatePresence>
+        {deleteTarget ? (
+          <motion.div
+            className={`fixed inset-0 ${LAYER_Z.modal} flex items-center justify-center bg-slate-950/45 p-4`}
+            initial={prefersReducedMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={prefersReducedMotion ? undefined : { opacity: 0 }}
+            role="presentation"
+            onMouseDown={() => !isDeleting && setDeleteTarget(null)}
+          >
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="delete-conversation-title"
+              initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={prefersReducedMotion ? undefined : { opacity: 0, scale: 0.96, y: 8 }}
+              onMouseDown={(event) => event.stopPropagation()}
+              className="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-card bg-white p-6 shadow-2xl"
+            >
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-red-50 text-red-600">
+                <Trash2 className="h-5 w-5" />
+              </div>
+              <h2 id="delete-conversation-title" className="mt-4 text-section font-semibold text-slate-900">
+                Permanently delete conversation?
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                This permanently deletes every message with <span className="font-medium text-slate-900">{deleteTarget.otherUserName}</span> in this conversation for both participants. It cannot be restored.
+              </p>
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(null)}
+                  disabled={isDeleting}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteConversation()}
+                  disabled={isDeleting}
+                  className="inline-flex min-w-28 items-center justify-center rounded-lg bg-red-700 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-800 disabled:opacity-60"
+                >
+                  {isDeleting ? "Deleting..." : "Delete permanently"}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      {canBrowseRecipients && showRecipientDirectory ? <RecipientDirectoryDialog onClose={() => setShowRecipientDirectory(false)} onSelect={selectDirectoryRecipient} /> : null}
+      {reportTarget ? <ConversationReportDialog contact={reportTarget} onClose={() => setReportTarget(null)} restoreFocusRef={reportTriggerRef} /> : null}
+      <OfferCancellationDialog offerId={cancelOfferId} onClose={() => setCancelOfferId(null)} onDone={() => void refreshOpenThreadMessages()} />
+      {hireOfferId && <HireChecklistDialog key={hireOfferId} title={t('messages.offerCard.confirmHireDialog.title')} description={t('messages.offerCard.confirmHireDialog.description')} warning={tc('hireChecklist.hireWarning')} onClose={() => setHireOfferId(null)} onConfirm={async (checklist) => {
+        await confirmOfferHire(hireOfferId, checklist); await refreshOpenThreadMessages(); toast.success(t('messages.offerCard.toast.hired'));
+      }} />}
+      <ConfirmDialog
+        open={Boolean(offerConfirmAction)}
+        title={offerConfirmAction?.title || ""}
+        description={offerConfirmAction?.description || ""}
+        confirmLabel={offerConfirmAction?.confirmLabel}
+        destructive={offerConfirmAction?.destructive}
+        pending={Boolean(offerActionBusyId)}
+        onConfirm={handleOfferConfirmDialogConfirm}
+        onClose={() => setOfferConfirmAction(null)}
+      />
+    </div>
+  );
+}

@@ -1,0 +1,232 @@
+import { useMemo, useState } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
+import { motionTokens, seconds } from "@/constants/motion";
+import { useNavigate } from 'react-router-dom';
+import { Bell, MessageSquare, CheckCircle, Clock, X } from 'lucide-react';
+import { useTranslation } from "react-i18next";
+import { toast } from '../../lib/toast';
+import { useAuth } from '../../hooks/useAuth';
+import { mapNotificationRecord, type FeedNotification, type NotificationFeedType } from '../../utils/notificationFeed';
+import { useNotifications } from '../../contexts/NotificationContext';
+
+export default function NotificationsPage() {
+  const { t } = useTranslation("worker");
+  const { t: tc } = useTranslation('common');
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const prefersReducedMotion = useReducedMotion();
+  const notificationState = useNotifications();
+  const [filterType, setFilterType] = useState<'all' | NotificationFeedType>('all');
+  const normalizedRole = String(user?.role || '').toLowerCase();
+  const isEmployerView =
+    user?.accountType === 'employer' ||
+    normalizedRole === 'employer' ||
+    normalizedRole === 'doctor' ||
+    normalizedRole === 'hire';
+  const notificationAudience: 'admin' | 'employer' | 'worker' =
+    normalizedRole === 'admin' || normalizedRole === 'superadmin'
+      ? 'admin'
+      : isEmployerView
+      ? 'employer'
+      : 'worker';
+
+  const notifications = useMemo<FeedNotification[]>(() => notificationState.notifications
+    .map((item: any) => mapNotificationRecord(item, notificationAudience, 'full')),
+  [notificationAudience, notificationState.notifications]);
+  const loading = notificationState.loading;
+  const error = notificationState.error;
+
+  const markRead = async (notificationId: string) => {
+    try {
+      await notificationState.setRead(notificationId, true);
+    } catch (err) {
+      console.warn('Failed to mark read', err);
+      toast.error(t("notifications.toast.markReadFailed"));
+    }
+  };
+
+  const markAll = async () => {
+    try {
+      await notificationState.markAllRead();
+      toast.success(t("notifications.toast.markAllReadSuccess"));
+    } catch (err: any) {
+      toast.error(err?.message || t("notifications.toast.markAllReadFailed"));
+    }
+  };
+
+  const removeNotification = async (id: string) => {
+    try {
+      await notificationState.remove(id);
+      toast.success(t("notifications.toast.removeSuccess"));
+    } catch (err) {
+      console.warn('Failed to remove notification', err);
+      toast.error(t("notifications.toast.removeFailed"));
+    }
+  };
+
+  return (
+    <div className="max-w-[1341px] mx-auto space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-4 border-b border-gray-200">
+        <div className="-mb-px flex min-w-0 gap-2 overflow-x-auto">
+          <button
+            onClick={() => setFilterType('all')}
+            className={`shrink-0 whitespace-nowrap px-4 py-2 border-b-2 font-medium text-sm min-h-11 ${
+              filterType === 'all'
+                ? 'border-brand-600 text-brand-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            {t("notifications.tabs.all")}
+          </button>
+          <button
+            onClick={() => setFilterType('application')}
+            className={`shrink-0 whitespace-nowrap px-4 py-2 border-b-2 font-medium text-sm min-h-11 inline-flex items-center gap-1 ${
+              filterType === 'application'
+                ? 'border-brand-600 text-brand-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <CheckCircle className="w-4 h-4" />
+            {t("notifications.tabs.applications")}
+          </button>
+          <button
+            onClick={() => setFilterType('message')}
+            className={`shrink-0 whitespace-nowrap px-4 py-2 border-b-2 font-medium text-sm min-h-11 inline-flex items-center gap-1 ${
+              filterType === 'message'
+                ? 'border-brand-600 text-brand-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <MessageSquare className="w-4 h-4" />
+            {t("notifications.tabs.messages")}
+          </button>
+          <button
+            onClick={() => setFilterType('payment')}
+            className={`shrink-0 whitespace-nowrap px-4 py-2 border-b-2 font-medium text-sm min-h-11 inline-flex items-center gap-1 ${
+              filterType === 'payment'
+                ? 'border-brand-600 text-brand-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <span className="text-[16px] leading-none font-semibold">₱</span>
+            {t("notifications.tabs.payments")}
+          </button>
+          <button
+            onClick={() => setFilterType('update')}
+            className={`shrink-0 whitespace-nowrap px-4 py-2 border-b-2 font-medium text-sm min-h-11 inline-flex items-center gap-1 ${
+              filterType === 'update'
+                ? 'border-brand-600 text-brand-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <Bell className="w-4 h-4" />
+            {t("notifications.tabs.updates")}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 pb-2">
+          <button
+            onClick={markAll}
+            className="inline-flex h-10 items-center rounded-lg px-2 text-sm font-semibold text-brand-600 hover:underline"
+          >
+            {t("notifications.actions.markAllRead")}
+          </button>
+          <button
+            onClick={() => void notificationState.refresh()}
+            className="inline-flex h-10 items-center rounded-lg px-2 text-sm font-medium text-gray-600 transition-colors hover:text-gray-700"
+          >
+            {t("notifications.actions.refresh")}
+          </button>
+        </div>
+      </div>
+
+      {loading && <div className="bg-white rounded-xl p-6 shadow-sm text-gray-600">{t("notifications.loading")}</div>}
+      {error && <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">{error}</div>}
+
+      <div className="space-y-4">
+        {notifications.length === 0 && !loading && (
+          <div className="bg-white rounded-xl p-6 shadow-sm text-center text-gray-600">{t("notifications.emptyState")}</div>
+        )}
+
+        {notifications
+          .filter((n) => filterType === 'all' || n.type === filterType)
+          .map((n, index) => (
+          <motion.div
+            key={n.id}
+            className={`rounded-xl p-4 shadow-sm border transition-colors hover:shadow-md ${!n.read ? 'bg-brand-50 border-brand-100' : 'bg-white border-gray-100 hover:bg-gray-50'}`}
+            initial={prefersReducedMotion ? false : { opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: Math.min(index, 8) * 0.04, duration: seconds(motionTokens.duration.standard) }}
+          >
+            <div className="flex items-start justify-between">
+              <div className="flex items-start gap-3 flex-1">
+                {/* Icon based on notification type */}
+                <div className={`mt-1 p-2 rounded-lg ${
+                  n.type === 'application' ? 'bg-brand-100 text-brand-600' :
+                  n.type === 'message' ? 'bg-indigo-100 text-indigo-600' :
+                  n.type === 'payment' ? 'bg-emerald-100 text-emerald-600' :
+                  'bg-amber-100 text-amber-700'
+                }`}>
+                  {n.type === 'application' && <CheckCircle className="w-5 h-5" />}
+                  {n.type === 'message' && <MessageSquare className="w-5 h-5" />}
+                  {n.type === 'payment' && <span className="text-[20px] leading-none font-semibold">₱</span>}
+                  {n.type === 'update' && <Bell className="w-5 h-5" />}
+                </div>
+
+                {/* Content */}
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-semibold text-gray-900">{n.title}</h3>
+                    {!n.read && <span className="inline-block w-2 h-2 bg-brand-600 rounded-full" />}
+                  </div>
+                  <p className="text-sm text-gray-600 mt-1">{n.message}</p>
+                  <p className="text-xs text-gray-400 mt-1 flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    {n.time}
+                  </p>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col items-end gap-2 ml-4">
+                <button
+                  onClick={() => removeNotification(n.id)}
+                  className="flex h-11 w-11 items-center justify-center rounded-lg text-gray-400 transition-colors hover:text-red-600"
+                  title={t("notifications.actions.removeNotification")}
+                >
+                  <X className="w-5 h-5" />
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { if (!n.read) void markRead(n.id); navigate(n.link); }}
+                    className="text-sm text-brand-600 font-semibold hover:underline"
+                  >
+                    {n.entityType === 'financial_dispute' ? tc('jobNotifications.openDispute') : ['job_offer', 'hire_checklist'].includes(n.entityType || '') ? t('notifications.viewAction.messages') : n.entityType === 'application' && n.link.includes('?applicationId=')
+                      ? tc('lifecycle.openAssignment')
+                      : n.type === 'application'
+                      ? isEmployerView
+                        ? t("notifications.viewAction.pipeline")
+                        : t("notifications.viewAction.applications")
+                      : n.type === 'message'
+                      ? t("notifications.viewAction.messages")
+                      : n.type === 'payment'
+                      ? t("notifications.viewAction.wallet")
+                      : t("notifications.viewAction.open")}
+                  </button>
+                  {!n.read && (
+                    <button
+                      onClick={() => markRead(n.id)}
+                      className="text-sm text-gray-600 hover:text-gray-700"
+                    >
+                      {t("notifications.actions.markRead")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        ))}
+      </div>
+    </div>
+  );
+}

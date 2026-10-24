@@ -1,0 +1,1385 @@
+{
+  "appliedJobs": {
+    "eyebrow": "Application tracker",
+    "title": "Aking mga aplikasyon",
+    "subtitle": "Subaybayan ang bawat aplikasyon mula sa pagsusumite hanggang sa pagkuha.",
+    "findJobsButton": "Maghanap ng trabaho",
+    "statusLabels": {
+      "all": "Lahat",
+      "applied": "Inaplayan",
+      "shortlisted": "Naka-shortlist",
+      "interviewScheduled": "Naka-iskedyul ang Interview",
+      "interviewed": "Na-interview na",
+      "offerSent": "Ipinadala ang Alok",
+      "hired": "Nakuha",
+      "rejected": "Tinanggihan",
+      "withdrawn": "Binawi",
+      "cancelled": "Kinansela",
+      "positionFilled": "Napunan na ang posisyon"
+    },
+    "summary": {
+      "loading": "Naglo-load ng mga aplikasyon...",
+      "count_one": "{{count}} aplikasyon",
+      "count_other": "{{count}} na aplikasyon",
+      "filterHint": "I-filter ayon sa stage na gusto mong suriin."
+    },
+    "statusFieldLabel": "Status",
+    "toast": {
+      "loadFailed": "Hindi na-load ang mga aplikasyon.",
+      "offerActionFailed": "Nabigo ang aksyon na iyon. Subukan muli.",
+      "offerAccepted": "Tinanggap ang alok.",
+      "workSubmitted": "Naisumite ang trabaho para sa pagsusuri."
+    },
+    "offerPanel": {
+      "title": "Nakatanggap ka ng alok na {{amount}}",
+      "accept": "Tanggapin ang {{amount}}",
+      "decline": "Tanggihan"
+    },
+    "confirmAcceptOffer": {
+      "title": "Tanggapin ang Alok",
+      "description": "Tanggapin ang {{amount}} na alok? Kukumpirmahin ng employer ang pag-hire sunod.",
+      "confirm": "Tanggapin ang Alok"
+    },
+    "confirmDeclineOffer": {
+      "title": "Tanggihan ang Alok",
+      "description": "Tanggihan ang {{amount}} na alok? Hindi na ito maibabalik.",
+      "confirm": "Tanggihan ang Alok"
+    },
+    "submitWork": {
+      "button": "Isumite ang natapos na trabaho"
+    },
+    "paymentDispute": {
+      "openButton": "Magbukas ng dispute sa bayad",
+      "onHold": "Naka-hold ang bayad habang sinusuri ito ng finance team.",
+      "viewExisting": "Tingnan ang kasalukuyang ticket",
+      "title": "Magbukas ng dispute sa bayad",
+      "description": "Ipaliwanag ang isyu sa bayad para sa {{subject}}. Ihihinto muna ang bayad habang sinusuri ng finance team.",
+      "reasonLabel": "Dahilan",
+      "reasonRequired": "Kinakailangan ang dahilan.",
+      "holdNotice": "Mananatiling naka-secure ang bayad hanggang masuri ng finance admin ang kaso.",
+      "opened": "Nabuksan ang dispute sa bayad.",
+      "cancel": "Kanselahin",
+      "submit": "Isumite ang dispute"
+    },
+    "card": {
+      "unavailableJob": "Hindi available na trabaho",
+      "employerFallback": "Employer",
+      "locationFallback": "Hindi tinukoy ang lokasyon",
+      "descriptionFallback": "Buksan ang trabaho para makita ang kumpletong detalye.",
+      "jobTypeFallback": "Trabaho",
+      "payFallback": "Hindi tinukoy ang bayad",
+      "minimumPay": "{{amount}} minimum",
+      "appliedOn": "Inaplayan {{date}}",
+      "deadlineOn": "Deadline {{date}}",
+      "rateEmployer": "I-rate ang Employer",
+      "reviewSubmitted": "Naisumite na ang review",
+      "viewDetails": "Tingnan ang detalye",
+      "completedJobFallback": "Nakumpletong trabaho"
+    },
+    "emptyState": {
+      "labelAll": "Application tracker",
+      "labelFiltered": "{{stage}} stage",
+      "titleAll": "Wala pang aplikasyon",
+      "titleFiltered": "Walang aplikasyon sa {{stage}}",
+      "descriptionAll": "Kapag nag-apply ka sa mga trabaho, lalabas ang mga ito dito kasama ang mga update sa status, progreso ng interview, at desisyon sa pagkuha.",
+      "descriptionFiltered": "Wala ka pang aplikasyon sa {{stage}} stage sa ngayon. Mag-browse ng iba pang trabaho o bumalik sa lahat ng aplikasyon.",
+      "browseJobs": "Mag-browse ng Trabaho",
+      "showAll": "Ipakita Lahat ng Aplikasyon"
+    }
+  },
+  "notifications": {
+    "tabs": {
+      "all": "Lahat",
+      "applications": "Mga Aplikasyon",
+      "messages": "Mga Mensahe",
+      "payments": "Mga Bayad",
+      "updates": "Mga Update"
+    },
+    "actions": {
+      "markAllRead": "Markahan lahat bilang nabasa",
+      "refresh": "I-refresh",
+      "markRead": "Markahan bilang nabasa",
+      "removeNotification": "Alisin ang notification"
+    },
+    "loading": "Naglo-load...",
+    "emptyState": "Walang notification.",
+    "viewAction": {
+      "pipeline": "Tingnan ang Pipeline",
+      "applications": "Tingnan ang mga Aplikasyon",
+      "messages": "Tingnan ang mga Mensahe",
+      "wallet": "Tingnan ang Wallet",
+      "open": "Buksan"
+    },
+    "toast": {
+      "markReadFailed": "Hindi na-mark bilang nabasa",
+      "markAllReadSuccess": "Na-mark lahat bilang nabasa",
+      "markAllReadFailed": "Hindi na-mark lahat bilang nabasa",
+      "removeSuccess": "Naalis ang notification",
+      "removeFailed": "Hindi naalis ang notification"
+    }
+  },
+  "savedJobs": {
+    "summary_one": "May {{count}} ka na-save na trabaho",
+    "summary_other": "May {{count}} kang na-save na trabaho",
+    "title": "Mga Na-save na Trabaho",
+    "filters": {
+      "all": "Lahat ng Trabaho"
+    },
+    "workMode": {
+      "remote": "Remote",
+      "hybrid": "Hybrid",
+      "onSite": "On-site"
+    },
+    "loading": "Naglo-load ng mga na-save na trabaho...",
+    "emptyState": {
+      "title": "Walang nahanap na na-save na trabaho",
+      "descriptionNoJobs": "Ang mga trabahong i-save mo mula sa marketplace ay lalabas dito.",
+      "descriptionNoMatch": "Walang tumugma sa iyong kasalukuyang filter na na-save na trabaho.",
+      "browseJobs": "Mag-browse ng Trabaho"
+    },
+    "card": {
+      "removeTitle": "Alisin sa na-save",
+      "removeAria": "Alisin ang {{title}} sa mga na-save na trabaho",
+      "salaryFallback": "Hindi tinukoy ang sahod",
+      "untitledJob": "Walang pamagat na trabaho",
+      "noDescription": "Walang ibinigay na deskripsyon.",
+      "remoteLocation": "Remote",
+      "deadlineFallback": "Hindi tinukoy",
+      "savedRecently": "Kararaang na-save",
+      "today": "Ngayon",
+      "daysAgo_one": "{{count}}d ang nakalipas",
+      "daysAgo_other": "{{count}}d ang nakalipas",
+      "generalRequirement": "Pangkalahatan",
+      "applicants_one": "{{count}} aplikante",
+      "applicants_other": "{{count}} na aplikante",
+      "deadlineLabel": "Deadline: {{deadline}}",
+      "viewJob": "Tingnan ang Trabaho",
+      "viewDetailsTitle": "Tingnan ang Detalye"
+    },
+    "toast": {
+      "removeSuccess": "Naalis ang trabaho sa listahan ng na-save",
+      "removeFailed": "Hindi naalis ang na-save na trabaho."
+    }
+  },
+  "findJobs": {
+    "hero": {
+      "eyebrow": "Paghahanap ng trabaho",
+      "title": "Hanapin ang iyong susunod na oportunidad",
+      "subtitle": "Maghanap ng trabaho sa buong Pilipinas, ihambing ang garantisadong bayad, at i-save ang mga oportunidad na gusto mo.",
+      "locationSearchAria": "Lokasyon para sa paghahanap ng trabaho",
+      "locationPlaceholder": "Lokasyon",
+      "nationwide": "Buong bansa",
+      "searchNationwide": "Maghanap sa buong bansa",
+      "locationHelp": "Pumili ng lungsod o lalawigan, o iwang blangko ang lokasyon para sa trabaho sa buong bansa. Pindutin ang Hanapin para makita ang mga resulta.",
+      "clearLocation": "Burahin ang lokasyon para maghanap sa buong bansa",
+      "submit": "Hanapin",
+      "savedJobs": "Mga na-save na trabaho",
+      "searchAria": "Maghanap ng trabaho",
+      "searchPlaceholder": "Maghanap ng pamagat ng trabaho o keyword",
+      "categoryFilterAria": "I-filter ayon sa kategorya",
+      "allCategories": "Lahat ng kategorya",
+      "cityButtonAriaSet": "Mga trabaho sa: {{location}}",
+      "cityButtonAriaUnset": "Itakda ang lungsod para sa paghahanap ng trabaho: {{location}}",
+      "setCityLabel": "Itakda ang lungsod"
+    },
+    "recommended": {
+      "title": "Inirerekomenda para sa iyo",
+      "subtitle": "Itinugma sa iyong mga kasanayan, piniling kategorya at karanasan.",
+      "showAll": "Ipakita ang lahat ng {{count}} rekomendasyon",
+      "showLess": "Ipakita ang mas kaunti",
+      "emptyProfileBody": "Idagdag ang iyong mga kasanayan at piniling kategorya para matugma namin ang mga trabaho sa iyong profile.",
+      "emptyProfileAction": "Kumpletuhin ang iyong profile",
+      "percentage": "{{percentage}}% tugma",
+      "level": {
+        "excellent": "Napakahusay na tugma",
+        "strong": "Malakas na tugma",
+        "good": "Magandang tugma",
+        "potential": "Posibleng tugma"
+      }
+    },
+    "locationBanner": {
+      "title": "Idagdag ang iyong lungsod para makita muna ang malalapit na trabaho",
+      "subtitle": "Nagba-browse ka ng trabaho sa buong bansa. Itakda ang iyong lungsod at ipapakita muna namin ang pinakamalapit.",
+      "updateLocation": "I-update ang lokasyon"
+    },
+    "preferences": {
+      "title": "Mga preference sa pagtutugma",
+      "subtitle": "Opsyonal na kategorya at keyword para sa mga rekomendasyon.",
+      "manage": "Pamahalaan",
+      "close": "Isara",
+      "keywordsLabel": "Mga keyword ng job preference",
+      "keywordsPlaceholder": "Mga keyword tulad ng repair, delivery, installation",
+      "saving": "Sine-save...",
+      "save": "I-save ang mga preference"
+    },
+    "results": {
+      "inLocation": "Ipinapakita ang mga trabaho sa {{location}}.",
+      "nationwide": "Ipinapakita ang mga trabaho sa buong Pilipinas.",
+      "countLabel_one": "{{count}} trabahong nahanap",
+      "countLabel_other": "{{count}} na trabahong nahanap",
+      "sortedBy": "Nakaayos ang mga oportunidad ayon sa {{sort}}.",
+      "nearestFirst": "Ipinapakita ang mga trabaho sa buong bansa, nauuna ang pinakamalapit sa {{city}}."
+    },
+    "sort": {
+      "ariaLabel": "Ayusin ang mga trabaho",
+      "options": {
+        "recent": "Pinakabago",
+        "salary": "Pinakamataas na minimum na bayad",
+        "applicants": "Pinakamaraming aplikante",
+        "nearest": "Pinakamalapit sa iyo"
+      }
+    },
+    "status": {
+      "loading": {
+        "title": "Naglo-load ng mga trabaho",
+        "description": "Hinahanap ang mga kasalukuyang oportunidad para sa iyo."
+      },
+      "error": {
+        "title": "Hindi na-load ang mga trabaho",
+        "retry": "Subukan muli"
+      },
+      "empty": {
+        "searchTitle": "Walang trabahong tumugma sa iyong paghahanap",
+        "defaultTitle": "Walang available na trabaho",
+        "searchDescription": "Sumubok ng ibang pamagat, kompanya, kategorya, o lokasyon.",
+        "defaultDescription": "Pakisuri muli sa ibang pagkakataon para sa mga bagong oportunidad."
+      }
+    },
+    "cadence": {
+      "month": "/buwan",
+      "year": "/taon",
+      "week": "/linggo",
+      "day": "/araw",
+      "hour": "/oras"
+    },
+    "toast": {
+      "jobSaved": "Na-save ang trabaho!",
+      "jobRemoved": "Naalis ang trabaho sa na-save",
+      "saveJobFailed": "Hindi na-update ang mga na-save na trabaho.",
+      "loadJobsFailed": "Hindi na-load ang mga trabaho.",
+      "preferencesSaved": "Na-save ang mga preference sa pagtutugma ng trabaho.",
+      "preferencesSaveFailed": "Hindi na-save ang mga preference sa trabaho."
+    },
+    "card": {
+      "categoryFallback": "Pangkalahatan",
+      "locationFallback": "Walang tinukoy na lokasyon",
+      "salaryMinimum": "{{salary}} minimum",
+      "highlightedByEmployer": "Naka-highlight ng employer",
+      "verifiedEmployer": "Ganap na napatunayang employer",
+      "verifiedEmployerTooltip": "Nakumpleto ng taong ito ang lahat ng pagsusuri sa pagkakakilanlan.",
+      "alreadyApplied": "Nakapag-apply na",
+      "applicationRejected": "Tinanggihan ang Aplikasyon"
+    },
+    "nearest": "Pinakamalapit sa {{city}}",
+    "nationwide": "Iba pang lugar sa Pilipinas",
+    "filters": {
+      "reset": "I-reset",
+      "showResults": "Ipakita ang resulta",
+      "clearAll": "Alisin lahat",
+      "activeCount_one": "{{count}} filter",
+      "activeCount_other": "{{count}} na filter",
+      "datePosted": {
+        "label": "Oras ng pag-post",
+        "past24Hours": "Nakaraang 24 oras",
+        "pastWeek": "Nakaraang linggo",
+        "pastMonth": "Nakaraang buwan"
+      },
+      "jobType": {
+        "label": "Uri ng trabaho"
+      },
+      "minimumPay": {
+        "label": "Sahod",
+        "option": "{{amount}}+ minimum"
+      },
+      "fewApplicants": {
+        "label": "Kaunting aplikante (<10)"
+      },
+      "category": {
+        "label": "Kategorya"
+      }
+    }
+  },
+  "jobDetails": {
+    "backToJobs": "Bumalik sa mga trabaho",
+    "loading": "Naglo-load ng detalye ng trabaho...",
+    "loadError": "Hindi na-load ang detalye ng trabaho.",
+    "notAvailable": "Hindi available ang detalye ng trabaho.",
+    "locationFallback": "Remote",
+    "employerFallback": "Employer",
+    "verifiedEmployer": "Ganap na napatunayang employer",
+    "verifiedEmployerTooltip": "Nakumpleto ng taong ito ang lahat ng pagsusuri sa pagkakakilanlan.",
+    "messageDraft": "Kumusta {{employerName}}, interesado ako sa posisyong {{jobTitle}}. Gusto ko sanang pag-usapan pa ang oportunidad na ito.",
+    "adminReadOnly": "Read-only admin view. Gamitin ang Admin Job Monitoring para tanggalin ang trabahong ito.",
+    "applicationSubmitted": "Naisumite ang Aplikasyon",
+    "jobFinished": "Tapos na ang Trabaho",
+    "applyNow": "Mag-apply Ngayon",
+    "viewJob": "Tingnan ang Trabaho",
+    "applicationRejected": "Tinanggihan ang Aplikasyon",
+    "messageEmployerLabel": "Mensahe sa employer",
+    "deadlineNotSpecified": "Hindi tinukoy",
+    "jobTypeLabels": {
+      "shortTerm": "Short-term",
+      "sideHustle": "Side hustle",
+      "recruiting": "Recruiting",
+      "partTime": "Part-Time",
+      "contract": "Kontrata",
+      "projectWork": "Project Work",
+      "fullTime": "Full-Time"
+    },
+    "workModeLabels": {
+      "remote": "Remote",
+      "hybrid": "Hybrid",
+      "onSite": "On-site"
+    },
+    "experienceLevels": {
+      "senior": "Senior",
+      "midLevel": "Mid-Level",
+      "entryLevel": "Entry Level"
+    },
+    "postedLabel": {
+      "recently": "Na-post kamakailan",
+      "today": "Na-post ngayon",
+      "daysAgo_one": "Na-post {{count}}d ang nakaraan",
+      "daysAgo_other": "Na-post {{count}}d ang nakaraan"
+    },
+    "salaryCadence": {
+      "perMonth": "kada buwan",
+      "perYear": "kada taon",
+      "perWeek": "kada linggo",
+      "perDay": "kada araw",
+      "perHour": "kada oras",
+      "minimumGuaranteed": "garantisadong minimum"
+    },
+    "save": {
+      "removeTitle": "Alisin sa na-save",
+      "saveTitle": "I-save ang trabaho",
+      "removeAria": "Alisin ang trabaho sa mga na-save na trabaho",
+      "saveAria": "I-save ang trabaho"
+    },
+    "sections": {
+      "description": "Deskripsyon ng Trabaho",
+      "noDescription": "Walang ibinigay na deskripsyon.",
+      "responsibilities": "Mga Responsibilidad",
+      "noResponsibilities": "Walang ibinigay na responsibilidad.",
+      "requirements": "Mga Kinakailangan",
+      "noRequirements": "Walang ibinigay na kinakailangan.",
+      "requiredSkills": "Mga Kinakailangang Kasanayan"
+    },
+    "overview": {
+      "title": "Buod ng Trabaho",
+      "deadline": "Deadline ng Aplikasyon",
+      "totalApplicants": "Kabuuang Aplikante",
+      "applicantsCount_one": "{{count}} aplikante",
+      "applicantsCount_other": "{{count}} na aplikante",
+      "experienceLevel": "Antas ng Karanasan",
+      "jobType": "Uri ng Trabaho"
+    },
+    "fallbackSkills": {
+      "webDevelopment": "Web Development",
+      "mobileApps": "Mobile Apps",
+      "cloudInfrastructure": "Cloud Infrastructure",
+      "devOps": "DevOps"
+    },
+    "toast": {
+      "applySuccess": "Matagumpay na naisumite ang aplikasyon!",
+      "applyFailed": "Hindi na-apply.",
+      "saveSuccess": "Matagumpay na na-save ang trabaho!",
+      "removeSuccess": "Naalis ang trabaho sa na-save",
+      "saveFailed": "Hindi na-update ang mga na-save na trabaho.",
+      "jobInfoMissing": "Hindi available ang impormasyon ng trabaho.",
+      "employerInfoMissing": "Hindi available ang impormasyon ng employer para sa trabahong ito.",
+      "startConversationFailed": "Hindi ma-simulan ang usapan sa employer na ito.",
+      "employerProfileMissing": "Hindi available ang profile ng employer para sa trabahong ito.",
+      "profileIncomplete": "Idagdag ang larawan sa profile sa Settings bago mag-apply sa trabaho.",
+      "applicationRejected": "Tinanggihan ang aplikasyon. Hindi ka na maaaring mag-apply muli para sa trabahong ito."
+    }
+  },
+  "eWallet": {
+    "role": {
+      "employer": "Employer",
+      "worker": "manggagawa"
+    },
+    "txLabel": {
+      "topUp": "Top-up",
+      "escrow": "Escrow",
+      "payout": "Payout",
+      "refund": "Refund",
+      "transaction": "Transaksyon"
+    },
+    "linkedEntity": {
+      "walletTopUp": "Deposit sa wallet",
+      "job": "Bayad sa trabaho"
+    },
+    "payoutStatus": {
+      "requested": "hiniling",
+      "approved": "aprubado",
+      "paid": "nabayaran",
+      "rejected": "tinanggihan",
+      "cancelled": "kinansela"
+    },
+    "transactionStatus": {
+      "COMPLETED": "Nakumpleto",
+      "PENDING": "Nakabinbin",
+      "FAILED": "Nabigo",
+      "CANCELLED": "Kinansela"
+    },
+    "toast": {
+      "loadFailed": "Hindi na-load ang data ng wallet.",
+      "invalidAmount": "Maglagay ng valid na halaga.",
+      "topUpInitFailed": "Hindi na-initialize ang top-up.",
+      "invalidPayoutAmount": "Maglagay ng valid na halaga ng payout.",
+      "payoutExceedsBalance": "Hindi maaaring lumampas ang halaga ng payout sa iyong balanse bilang manggagawa.",
+      "incompleteDestination": "Kumpletuhin ang detalye ng destinasyon bago isumite ang iyong withdrawal.",
+      "withdrawalSubmitted": "Naisumite ang withdrawal.",
+      "withdrawalSubmitFailed": "Hindi naisumite ang withdrawal.",
+      "withdrawalCancelled": "Kinansela ang withdrawal.",
+      "withdrawalCancelFailed": "Hindi nakansela ang withdrawal."
+    },
+    "balanceCard": {
+      "combinedBalance": "Pinagsamang Balanse",
+      "currentBalance": "Kasalukuyang Balanse ({{role}})",
+      "loading": "Naglo-load...",
+      "descriptionBoth": "Ang pinagsamang balanse mo bilang employer at manggagawa. I-top up ang iyong wallet para pondohan ang mga trabaho, at i-withdraw ang iyong nakitang balanse.",
+      "descriptionEmployer": "Nagdadagdag dito ang mga employer ng pondo para bayaran ang escrow at ang kita ng manggagawa.",
+      "descriptionWorker": "Maaari lamang mag-withdraw ang mga manggagawa ng nakumpletong kita dito kapag available na ang mga payout.",
+      "employerBalance": "Balanse bilang Employer",
+      "workerBalance": "Balanse bilang Manggagawa",
+      "pendingWithdrawals": "Nakabinbing Withdrawal",
+      "totalTransactions": "Kabuuang Transaksyon",
+      "topUp": "Mag-top Up",
+      "withdrawWorkerFunds": "I-withdraw ang Pondo bilang Manggagawa",
+      "withdrawFunds": "I-withdraw ang Pondo"
+    },
+    "stats": {
+      "moneyIn": "Papasok na Pera",
+      "moneyInHelper": "Nakumpletong top-up, payout, at refund na natanggap",
+      "moneyOut": "Palabas na Pera",
+      "moneyOutHelper": "Nakumpletong escrow ng trabaho at mga withdrawal sa wallet",
+      "withdrawals": "Mga Withdrawal",
+      "withdrawalsHelper": "Mga hiniling, naaprubahan, at nabayarang withdrawal"
+    },
+    "pager": {
+      "ariaLabel": "Mga seksyon ng wallet",
+      "previous": "Nakaraang seksyon",
+      "next": "Susunod na seksyon"
+    },
+    "history": {
+      "title": "Kasaysayan ng Withdrawal",
+      "subtitle": "Subaybayan ang hiniling, aprubado, tinanggihan, nabayaran, at kinanselang withdrawal.",
+      "workerOnly": "Para sa wallet ng manggagawa lamang",
+      "loading": "Naglo-load ng mga withdrawal...",
+      "empty": "Wala pang withdrawal.",
+      "emptyDescription": "Lilitaw dito ang mga withdrawal na hihilingin mo kasama ang status ng pagsusuri.",
+      "requested": "Hiniling",
+      "reviewed": "Nasuri",
+      "paid": "Nabayaran",
+      "cancelling": "Kinakansela...",
+      "cancel": "Kanselahin ang Withdrawal"
+    },
+    "form": {
+      "title": "I-withdraw ang Pondo",
+      "availableToWithdraw": "Available na i-withdraw: {{amount}}. Agad na maibabawas ang withdrawal sa iyong balanse bilang manggagawa at mananatiling nakabinbin hanggang masuri.",
+      "amountLabel": "Halaga (PHP)",
+      "methodLabel": "Paraan",
+      "methodOptions": {
+        "bankTransfer": "Bank transfer",
+        "gcash": "GCash",
+        "maya": "Maya"
+      },
+      "institutionLabel": "Institusyon",
+      "institutionPlaceholder": "BDO, GCash, Maya",
+      "accountNameLabel": "Pangalan sa Account",
+      "accountNamePlaceholder": "Juan Dela Cruz",
+      "accountNumberLabel": "Numero ng Account",
+      "accountNumberPlaceholder": "09171234567 o numero ng bank account",
+      "submitting": "Isinusumite ang withdrawal...",
+      "submit": "I-withdraw ang Pondo"
+    },
+    "transactions": {
+      "titlePayment": "Kasaysayan ng Bayad",
+      "titleRecent": "Kamakailang mga Transaksyon",
+      "helper": "Kasama ang naka-link na status ng transaksyon at reference ng payout",
+      "loading": "Naglo-load ng mga transaksyon...",
+      "empty": "Wala pang transaksyon.",
+      "columns": {
+        "type": "Uri",
+        "status": "Status",
+        "label": "Label",
+        "amount": "Halaga",
+        "reference": "Reference",
+        "linkedEntity": "Naka-link na Entidad",
+        "date": "Petsa"
+      }
+    },
+    "topUpModal": {
+      "title": "Mag-top Up",
+      "amountLabel": "Halaga (PHP)",
+      "description": "Ang pagpopondo ng employer lamang ang top-up flow dito. Ang mga account ng manggagawa ay nag-wi-withdraw mula sa nakitang balanse.",
+      "depositAmount": "Halaga ng Deposito",
+      "processingFee": "Walang bayad sa pagproseso",
+      "totalAmountCharged": "Halagang Sisingilin",
+      "cancel": "Kanselahin",
+      "proceed": "Magpatuloy sa Checkout",
+      "redirecting": "Nire-redirect..."
+    }
+  },
+  "messages": {
+    "safety": {
+      "title": "Mag-ingat.",
+        "description": "Maging magalang sa chat. Huwag ibigay ang password o verification code. Panatilihin ang bayad sa MicroJobs at i-report ang pang-aabuso, pagbabanta, o posibleng scam."
+      },
+      "report": {
+        "action": "I-report ang user",
+        "title": "I-report si {{name}}",
+        "description": "Ipaalam sa mga admin ang pagmumura, pang-aabuso, o posibleng scam sa pag-uusap na ito.",
+        "reason": "Dahilan ng pag-report",
+        "chooseReason": "Pumili ng dahilan",
+        "reasons": {
+          "abuse": "Pagmumura, pang-aabuso, o pangha-harass",
+          "scam": "Scam o panloloko",
+          "threats": "Pagbabanta o mapanganib na asal",
+          "other": "Iba pang alalahanin"
+        },
+        "details": "Karagdagang detalye (opsyonal)",
+        "evidenceNotice": "Ibabahagi sa mga admin ang pinakahuling 20 mensahe sa pag-uusap na ito para sa pagsusuri. Hindi awtomatikong iba-block o paparusahan ang taong ito kapag ni-report.",
+        "cancel": "Kanselahin",
+        "submit": "Isumite ang report",
+        "submitting": "Isinusumite…",
+        "success": "Naisumite ang report. Susuriin ng mga admin ang pag-uusap.",
+        "alreadyPending": "May report na ang pag-uusap na ito na naghihintay ng pagsusuri ng admin.",
+        "failed": "Hindi naisumite ang report. Subukan muli."
+      },
+    "title": "Mga Mensahe",
+    "listOptionsLabel": "Mga opsyon sa listahan",
+    "backToInbox": "Bumalik sa Inbox",
+    "viewArchived": "Tingnan ang Archived",
+    "searchPlaceholder": "Maghanap",
+    "searchAria": "Maghanap ng mga usapan",
+    "emptyArchived": "Walang naka-archive na usapan.",
+    "emptyInbox": "Wala pang usapan.",
+    "noConversationSelected": "Pumili ng usapan para magsimulang mag-mensahe.",
+    "back": "Bumalik",
+    "backAria": "Bumalik sa mga usapan",
+    "typing": "nagta-type…",
+    "reJob": "Tungkol sa: {{jobTitle}}",
+    "moreOptions": "Higit pang opsyon",
+    "moreOptionsAria": "Buksan ang mga opsyon ng usapan",
+    "unarchive": "I-unarchive",
+    "archive": "I-archive",
+    "viewProfile": "Tingnan ang profile",
+    "viewProfileAria": "Tingnan ang profile ni {{name}}",
+    "blockUser": "I-block ang user",
+    "deleteConversation": "Tanggalin ang usapan",
+    "noMessagesYet": "Wala pang mensahe. Simulan ang usapan!",
+    "failedToSend": "Hindi naipadala · pindutin para subukan muli",
+    "sending": "Ipinapadala…",
+    "edited": "(na-edit)",
+    "edit": "I-edit",
+    "read": "Nabasa",
+    "sent": "Naipadala",
+    "composerPlaceholder": "Maglagay ng mensahe",
+    "composerAria": "Mensahe",
+    "sendAria": "Ipadala ang mensahe",
+    "noMessagesPreview": "Wala pang mensahe",
+    "userFallback": "User",
+    "employerFallback": "Employer",
+    "adminSupportName": "Support Agent",
+    "time": {
+      "now": "ngayon lang",
+      "minutesAgo_one": "{{count}}m ang nakaraan",
+      "minutesAgo_other": "{{count}}m ang nakaraan",
+      "hoursAgo_one": "{{count}}h ang nakaraan",
+      "hoursAgo_other": "{{count}}h ang nakaraan",
+      "daysAgo_one": "{{count}}d ang nakaraan",
+      "daysAgo_other": "{{count}}d ang nakaraan",
+      "today": "Ngayon"
+    },
+    "confirm": {
+      "blockUser": "Sigurado ka bang gusto mong i-block si {{name}}? Hindi na sila makakapagpadala sa iyo ng mensahe.",
+      "removeConversation": "Alisin ang usapang ito kay {{name}} mula sa iyong inbox? Mananatili ang kopya ng kabilang tao."
+    },
+    "toast": {
+      "blockedSuccess": "Na-block si {{name}}",
+      "blockFailed": "Hindi na-block ang user",
+      "archiveSuccess": "Na-archive ang usapan",
+      "archiveFailed": "Hindi na-archive ang usapan",
+      "unarchiveSuccess": "Inilipat ang usapan sa inbox",
+      "unarchiveFailed": "Hindi na-unarchive ang usapan",
+      "deleteSuccess": "Naalis ang usapan sa iyong inbox",
+      "deleteFailed": "Hindi natanggal ang usapan",
+      "loadConversationsFailed": "Hindi na-load ang mga usapan",
+      "loadMessagesFailed": "Hindi na-load ang mga mensahe",
+      "editWindowExpired": "Maaari mo lang i-edit ang mensahe sa loob ng 30 segundo.",
+      "emptyMessage": "Hindi maaaring walang laman ang mensahe.",
+      "messageUpdated": "Na-update ang mensahe",
+      "editFailed": "Hindi ma-edit ang mensahe",
+      "sendFailed": "Hindi naipadala ang mensahe"
+    },
+    "editing": {
+      "cancel": "Kanselahin",
+      "save": "I-save"
+    },
+    "offerCard": {
+      "eyebrow": "Job offer",
+      "fallbackTitle": "Job offer",
+      "escrowHint": "May escrow protection hanggang matapos at kumpirmahin ang trabaho.",
+      "accept": "Tanggapin",
+      "decline": "Tanggihan",
+      "cancel": "Kanselahin ang offer",
+      "confirmHire": "Kumpirmahin ang hire",
+      "status": {
+        "pending": "Naghihintay",
+        "accepted": "Tinanggap",
+        "rejected": "Tinanggihan",
+        "cancelled": "Nakansela",
+        "hired": "Na-hire"
+      },
+      "confirmAccept": {
+        "title": "Tanggapin ang offer",
+        "description": "Tanggapin ang {{amount}} offer? Kukumpirmahin ng employer ang hire kasunod nito.",
+        "confirm": "Tanggapin ang offer"
+      },
+      "confirmDecline": {
+        "title": "Tanggihan ang offer",
+        "description": "Tanggihan ang {{amount}} offer? Hindi na ito maibabalik.",
+        "confirm": "Tanggihan ang offer"
+      },
+      "confirmCancel": {
+        "title": "Kanselahin ang offer",
+        "description": "Kanselahin ang job offer na ito? Aabisuhan ang worker at mai-refund ang naka-escrow na halaga.",
+        "confirm": "Kanselahin ang offer"
+      },
+      "confirmHireDialog": {
+        "title": "Kumpirmahin ang hire",
+        "description": "Kumpirmahin ang hire na ito? Mamarkahan ang worker bilang na-hire para sa trabahong ito.",
+        "confirm": "Kumpirmahin ang hire"
+      },
+      "toast": {
+        "accepted": "Tinanggap ang offer.",
+        "declined": "Tinanggihan ang offer.",
+        "cancelled": "Nakansela ang offer.",
+        "hired": "Nakumpirma ang hire.",
+        "actionFailed": "Hindi natapos ang aksyon. Subukan muli."
+      }
+    },
+    "dock": {
+      "title": "Mga Mensahe",
+      "expandAria": "Buksan ang mga mensahe",
+      "collapseAria": "I-collapse ang mga mensahe",
+      "backAria": "Bumalik sa mga usapan",
+      "emptyInbox": "Wala pang mga usapan.",
+      "composerPlaceholder": "Sumulat ng mensahe…",
+      "openFullView": "Buksan ang buong view"
+    }
+  },
+  "profile": {
+    "dateUnavailable": "Petsang hindi available",
+    "locationNotSet": "Hindi itinakda ang lokasyon",
+    "retry": "Subukan muli",
+    "editProfile": "I-edit ang Profile",
+    "addMore": "+ Magdagdag pa",
+    "bio": {
+      "more": "HIGIT PA",
+      "less": "Bawasan"
+    },
+    "statRow": {
+      "certificates": "Mga Sertipiko",
+      "internships": "Mga Internship"
+    },
+    "internships": {
+      "heading": "Mga Internship",
+      "empty": "Wala pang naidagdag na internship."
+    },
+    "certificates": {
+      "heading": "Mga Sertipiko",
+      "empty": "Wala pang naidagdag na sertipiko.",
+      "noExpiry": "Walang expiry",
+      "credentialId": "Credential ID: {{id}}",
+      "verify": "I-verify ang credential"
+    },
+    "tabs": {
+      "overview": "Overview",
+      "experience": "Karanasan",
+      "biography": "Talambuhay",
+      "skills": "Kasanayan",
+      "accepted": "Tinanggap na Trabaho",
+      "portfolio": "Portfolio"
+    },
+    "completeness": {
+      "title": "Kakumpletuhan ng profile",
+      "ready": "Handa na ang iyong profile para sa mga employer.",
+      "incomplete": "Idagdag ang mga kulang na detalye para mas mabilis kang masuri ng mga employer.",
+      "refreshingAria": "Nire-refresh ang profile",
+      "ariaLabel": "Kakumpletuhan ng profile"
+    },
+    "identityVerification": {
+      "title": "Pag-verify ng pagkakakilanlan",
+      "description": "Kumpletuhin ang lahat ng apat na pagsusuri upang makuha ang iyong Verified badge.",
+      "verifiedDescription": "Kumpleto ang lahat ng apat na pagsusuri. Aktibo ang iyong Verified badge.",
+      "refreshingAria": "Nire-refresh ang pag-verify ng pagkakakilanlan",
+      "ariaLabel": "Progreso ng pag-verify ng pagkakakilanlan",
+      "progressText": "{{completed}} sa {{total}} requirement sa pag-verify ng pagkakakilanlan ang nakumpleto",
+      "requirementsTitle": "Kumpletuhin ang mga requirement na ito upang ma-verify ang iyong pagkakakilanlan"
+    },
+    "overviewTab": {
+      "aboutMe": "Tungkol sa Akin",
+      "aboutFallback": "Wala pang idinagdag na buod ng profile.",
+      "contactInfo": "Impormasyon sa Pakikipag-ugnayan",
+      "email": "Email",
+      "phone": "Telepono",
+      "linkedin": "LinkedIn",
+      "website": "Website",
+      "notSet": "Hindi itinakda",
+      "openProfile": "Buksan ang profile",
+      "visitWebsite": "Bisitahin ang website",
+      "skills": "Mga Kasanayan",
+      "noSkillsShort": "Wala pang idinagdag na kasanayan",
+      "noDescriptionAdded": "Walang idinagdag na deskripsyon",
+      "cvResume": "CV/Resume",
+      "resumeName": "Resume ni {{name}}",
+      "resumeUploaded": "Na-upload na ang resume",
+      "downloadResume": "I-download ang Resume",
+      "viewResumeHint": "Tingnan ang iyong na-upload na propesyonal na resume",
+      "replaceResume": "Palitan o alisin ang résumé",
+      "noResumeUploaded": "Walang na-upload na resume",
+      "uploadResume": "I-upload ang Resume",
+      "quickStats": "Mabilisang Estadistika",
+      "totalExperience": "Kabuuang Karanasan",
+      "jobsCompleted": "Nakumpletong Trabaho",
+      "jobsCompletedInline": "{{count}} nakumpleto",
+      "jobsApplied": "Inaplayang Trabaho",
+      "successRate": "Success Rate"
+    },
+    "skillsTab": {
+      "heading": "Kasanayan at Karanasan",
+      "manage": "Pamahalaan",
+      "workHistory": "Kasaysayan ng trabaho",
+      "entry_one": "{{count}} entry",
+      "entry_other": "{{count}} na entry",
+      "present": "Kasalukuyan",
+      "noWorkHistory": "Wala pang idinagdag na kasaysayan ng trabaho.",
+      "skillsHeading": "Mga Kasanayan",
+      "skill_one": "{{count}} kasanayan",
+      "skill_other": "{{count}} na kasanayan",
+      "endorsements_one": "{{count}} endorsement",
+      "endorsements_other": "{{count}} na endorsement",
+      "noSkillsTitle": "Wala pang idinagdag na kasanayan",
+      "noSkillsHint": "Pumunta sa Settings para magdagdag at pamahalaan ang iyong mga kasanayan"
+    },
+    "acceptedTab": {
+      "heading": "Tinanggap na Trabaho",
+      "loading": "Naglo-load ng tinanggap na trabaho…",
+      "loadFailed": "Hindi na-load ang tinanggap na trabaho.",
+      "noneTitle": "Wala pang tinanggap na trabaho",
+      "noneHint": "Kapag tumanggap ka ng trabaho, lalabas ito dito",
+      "status": {
+        "completed": "Nakumpleto",
+        "inProgress": "Kasalukuyang Ginagawa"
+      },
+      "employerFallback": "Employer",
+      "untitledJob": "Walang pamagat na trabaho",
+      "salaryUnavailable": "Hindi available ang sahod",
+      "noDescription": "Walang ibinigay na deskripsyon."
+    },
+    "publicView": "Pampublikong Tanaw",
+    "portfolioTab": {
+      "heading": "Portfolio",
+      "empty": "Wala pang larawan sa portfolio",
+      "emptyHint": "Maglagay ng larawan sa isang work experience entry sa Settings para mabuo ang iyong portfolio.",
+      "manage": "Pamahalaan sa Settings"
+    }
+  },
+  "support": {
+    "faqs": {
+      "accountVerify": {
+        "question": "Paano ko ma-verify ang aking account?",
+        "answer": "Pumunta sa settings at kumpletuhin ang iyong mga detalye ng pagkakakilanlan. Mananatiling visible ang mga verification item hanggang masuri ang mga ito."
+      },
+      "payoutTime": {
+        "question": "Gaano katagal ang mga payout?",
+        "answer": "Manu-manong sinusuri ang mga payout request. Kapag naaprubahan, masusubaybayan mo ang bawat request sa kasaysayan ng iyong wallet."
+      },
+      "applicationStatus": {
+        "question": "Bakit nagbago ang stage ng aking aplikasyon?",
+        "answer": "Inililipat na ngayon ng mga employer ang mga aplikasyon sa mga malinaw na yugto ng pipeline tulad ng Shortlisted, Interview Scheduled, Offer Sent, at Hired."
+      },
+      "messages": {
+        "question": "Maaari ko bang direktang kontakin ang isang employer?",
+        "answer": "Oo. Gamitin ang seksyon ng Mga Mensahe mula sa detalye ng trabaho o sa iyong proseso ng aplikasyon para direktang kontakin ang employer."
+      },
+      "security": {
+        "question": "Paano ko papananatilihing ligtas ang aking account?",
+        "answer": "Gumamit ng matibay na password, i-enable ang MFA sa settings, at regular na suriin ang mga aktibong session mula sa iyong mga setting ng account."
+      }
+    },
+    "statusLabels": {
+      "open": "Bukas",
+      "in_progress": "Ginagawa Na",
+      "waiting_user": "Naghihintay sa Iyo",
+      "resolved": "Naresolba",
+      "closed": "Sarado"
+    },
+    "priorityLabels": {
+      "low": "Mababa",
+      "medium": "Katamtaman",
+      "high": "Mataas",
+      "urgent": "Kagyat"
+    },
+    "toast": {
+      "noSupportAdmin": "Walang available na support admin sa ngayon.",
+      "openMessagesFailed": "Hindi nabuksan ang mga mensahe ng support.",
+      "ticketRequiredFields": "Kinakailangan ang subject at mensahe.",
+      "ticketSubmitFailed": "Hindi naisumite ang support ticket.",
+      "ticketSubmitted": "Naisumite ang support ticket.",
+      "replySendFailed": "Hindi naipadala ang reply.",
+      "replySent": "Naipadala ang reply.",
+      "loadTicketsFailed": "Hindi na-load ang mga support ticket.",
+      "loadTicketDetailsFailed": "Hindi na-load ang detalye ng ticket."
+    },
+    "header": {
+      "title": "Support Center",
+      "subtitle": "Maghanap ng FAQ, magbukas ng support ticket, at subaybayan ang bawat reply sa iisang thread.",
+      "signedInAs": "Naka-sign in bilang",
+      "userFallback": "User ng MicroJobs",
+      "emailFallback": "Lalabas dito ang mga reply ng support."
+    },
+    "cards": {
+      "messageSupport": {
+        "title": "Mensahe sa Support",
+        "description": "Gamitin ang messaging workspace para sa mga kagyat na usapan sa support team.",
+        "opening": "Binubuksan...",
+        "open": "Buksan ang Mga Mensahe"
+      },
+      "emailSupport": {
+        "title": "Email Support",
+        "sendEmail": "Magpadala ng Email"
+      },
+      "securityEscalation": {
+        "title": "Security Escalation",
+        "description": "Pagkakompromiso ng account, alitan sa payout, at mga alalahanin sa pagkakakilanlan.",
+        "escalate": "I-escalate ang Isyu",
+        "subjectDefault": "Security escalation"
+      }
+    },
+    "faqSection": {
+      "title": "Mga Madalas Itanong",
+      "searchPlaceholder": "Maghanap ng FAQ...",
+      "categories": {
+        "all": "Lahat",
+        "account": "Account",
+        "payments": "Mga Bayad",
+        "jobs": "Mga Trabaho"
+      }
+    },
+    "ticketForm": {
+      "title": "Magsumite ng Support Ticket",
+      "subtitle": "Gumawa ng ticket para sa isyu sa payout, access sa account, alitan sa aplikasyon, o bug sa platform.",
+      "subjectLabel": "Subject",
+      "subjectPlaceholder": "Maikling deskripsyon ng isyu",
+      "categoryLabel": "Kategorya",
+      "categories": {
+        "general": "Pangkalahatan",
+        "payments": "Mga Bayad",
+        "account": "Account",
+        "jobs": "Mga Trabaho",
+        "technical": "Teknikal"
+      },
+      "priorityLabel": "Priyoridad",
+      "replyDestinationLabel": "Destinasyon ng Reply",
+      "signedInEmailFallback": "Naka-sign in na email",
+      "messageLabel": "Mensahe",
+      "messagePlaceholder": "Ilarawan ang isyu, ang inaasahang resulta, at anumang petsa o reference na dapat naming suriin.",
+      "submitting": "Isinusumite...",
+      "submit": "Isumite ang Ticket"
+    },
+    "sidebar": {
+      "yourTickets": "Iyong mga Ticket",
+      "loadingHistory": "Naglo-load ng kasaysayan ng ticket...",
+      "emptyTitle": "Wala pang ticket",
+      "emptyHint": "Magsumite ng ticket para simulan ang isang support thread.",
+      "messagesCount_one": "{{count}} mensahe",
+      "messagesCount_other": "{{count}} na mensahe",
+      "noMessagesYet": "Wala pang mensahe.",
+      "ticketThread": "Thread ng Ticket",
+      "selectTicket": "Pumili ng ticket para suriin ang thread.",
+      "opened": "Binuksan {{date}}",
+      "supportTeam": "Support Team",
+      "you": "Ikaw",
+      "closedNotice": "Sarado na ang ticket na ito. Magbukas ng bagong ticket kung kailangan mo pa ng tulong.",
+      "replyPlaceholder": "Magdagdag ng detalye o mag-reply sa support...",
+      "sendingReply": "Ipinapadala ang reply...",
+      "replyToTicket": "I-reply sa Ticket"
+    }
+  },
+  "settings": {
+    "eyebrow": "Mga kagustuhan sa account",
+    "title": "Mga Setting",
+    "subtitle": "Pamahalaan ang iyong profile, seguridad, pagpapatunay, at impormasyon sa bayad.",
+    "tabs": {
+      "ariaMain": "Mga seksyon ng setting",
+      "ariaAccount": "Mga seksyon ng setting ng account",
+      "account": "Account",
+      "privacy": "Seguridad at Privacy",
+      "payments": "Mga Bayad"
+    },
+    "accountTabs": {
+      "personal": "Personal na Impormasyon",
+      "business": "Impormasyon ng Negosyo",
+      "experience": "Karanasan",
+      "resume": "CV/Resume"
+    },
+    "privacyTabs": {
+      "aria": "Mga seksyon ng seguridad at privacy",
+      "security": "Seguridad",
+      "verification": "Beripikasyon",
+      "privacy": "Privacy"
+    },
+    "personal": {
+      "businessHeading": "Impormasyon ng Negosyo",
+      "personalHeading": "Personal na Impormasyon",
+      "businessSubtitle": "I-update ang iyong employer profile.",
+      "personalSubtitle": "I-update ang iyong impormasyon sa profile.",
+      "loading": "Naglo-load ng profile...",
+      "firstName": "Pangalan",
+      "lastName": "Apelyido",
+      "companyName": "Pangalan ng kompanya",
+      "companyNamePlaceholder": "Ilagay ang pangalan ng iyong kompanya",
+      "retry": "Subukan muli",
+      "province": "Probinsya",
+      "provincePlaceholderLoading": "Naglo-load ng mga probinsya...",
+      "provincePlaceholder": "Maghanap ng probinsya",
+      "city": "Lungsod / Munisipyo",
+      "cityPlaceholder": "Maghanap ng lungsod o munisipyo",
+      "cityPlaceholderDisabled": "Piliin muna ang probinsya",
+      "barangay": "Barangay",
+      "barangayPlaceholderDisabled": "Piliin muna ang lungsod",
+      "barangayPlaceholderLoading": "Naglo-load ng mga barangay...",
+      "barangayPlaceholder": "Maghanap ng barangay",
+      "locationType": "Uri ng lokasyon",
+      "locationTypeOptions": {
+        "home": "Tirahan",
+        "office": "Opisina / Address ng negosyo",
+        "place": "Landmark / Lugar"
+      },
+      "address": "Address / Lugar",
+      "addressPlaceholderPlace": "hal., Malapit sa City Hall",
+      "addressPlaceholderDefault": "Numero ng bahay, kalye, subdivision",
+      "addressSuggestions": {
+        "nearCityHall": "Malapit sa City Hall",
+        "nearPublicMarket": "Malapit sa Palengke",
+        "nearBarangayHall": "Malapit sa Barangay Hall",
+        "nearTransportTerminal": "Malapit sa Terminal",
+        "nearSchoolZone": "Malapit sa Paaralan",
+        "nearBusinessDistrict": "Malapit sa Business District"
+      },
+      "phone": "Numero ng telepono",
+      "phonePlaceholder": "hal., 0917 123 4567",
+      "email": "Email",
+      "about": "Tungkol sa Akin",
+      "aboutPlaceholder": "Ikwento ang tungkol sa iyong sarili, karanasan, at ang iyong hilig...",
+      "jobPosition": "Propesyonal na headline",
+      "jobPositionPlaceholder": "hal., House cleaner, Tutor, Delivery specialist",
+      "linkedin": "LinkedIn URL",
+      "linkedinPlaceholder": "https://linkedin.com/in/your-name",
+      "website": "Portfolio o website",
+      "websitePlaceholder": "https://your-portfolio.example",
+      "experienceLabel": "Kabuuang Karanasan",
+      "experienceOptions": {
+        "select": "Pumili ng karanasan",
+        "lessThanOne": "Wala pang 1 Taon",
+        "one": "1 Taon",
+        "two": "2 Taon",
+        "three": "3 Taon",
+        "four": "4 Taon",
+        "five": "5 Taon",
+        "six": "6 Taon",
+        "seven": "7 Taon",
+        "eight": "8 Taon",
+        "nine": "9 Taon",
+        "tenPlus": "10+ Taon"
+      },
+      "photo": "Larawan sa profile",
+      "changePhoto": "Palitan ang larawan",
+      "removePhoto": "Alisin ang larawan",
+      "uploadPhoto": "I-upload ang iyong larawan",
+      "photoHint": "(jpg/png na format)",
+      "saving": "Sine-save...",
+      "loadingButton": "Naglo-load...",
+      "save": "I-save ang mga pagbabago"
+    },
+    "experience": {
+      "heading": "Mga Kasanayan at Karanasan",
+      "subtitle": "Idagdag at pamahalaan ang iyong mga kasanayan at kadalubhasaan.",
+      "editHeading": "I-edit ang karanasan sa trabaho",
+      "addHeading": "Magdagdag ng karanasan sa trabaho",
+      "formSubtitle": "Ipakita sa mga employer ang mga tungkulin, trabaho para sa kliyente, o self-employment na sumusuporta sa iyong mga kasanayan.",
+      "jobTitle": "Titulo ng trabaho *",
+      "jobTitlePlaceholder": "hal., Math tutor",
+      "company": "Kompanya o kliyente *",
+      "companyPlaceholder": "hal., Self-employed",
+      "location": "Lokasyon",
+      "locationPlaceholder": "Lungsod o Remote",
+      "start": "Simula *",
+      "end": "Katapusan *",
+      "current": "Kasalukuyan akong nagtatrabaho dito",
+      "description": "Deskripsyon",
+      "descriptionPlaceholder": "Ilarawan ang iyong mga responsibilidad at resulta",
+      "saving": "Sine-save...",
+      "save": "I-save ang karanasan",
+      "add": "Magdagdag ng karanasan",
+      "cancel": "Kanselahin",
+      "historyHeading": "Kasaysayan ng trabaho",
+      "entry_one": "{{count}} entry",
+      "entry_other": "{{count}} na entry",
+      "present": "Kasalukuyan",
+      "edit": "I-edit",
+      "deleteAria": "Alisin ang karanasang {{title}}",
+      "empty": "Wala pang naidagdag na kasaysayan ng trabaho."
+    },
+    "skills": {
+      "addNew": "Magdagdag ng Bagong Kasanayan",
+      "chooseOption": "Pumili ng Opsyon",
+      "selectFromList": "Pumili mula sa listahan",
+      "customSkill": "Custom na kasanayan",
+      "skillName": "Pangalan ng Kasanayan",
+      "selectPlaceholder": "Pumili ng kasanayan",
+      "customPlaceholder": "hal., Flutter, Blockchain, Video Editing",
+      "descriptionLabel": "Deskripsyon o tala ng karanasan",
+      "descriptionPlaceholder": "Opsyonal: ilarawan kung ano ang kaya mong gawin o ang iyong karanasan sa kasanayang ito",
+      "saving": "Sine-save...",
+      "add": "Idagdag ang Kasanayan",
+      "yourSkills": "Mga Kasanayan Mo",
+      "noDescription": "Walang naidagdag na deskripsyon",
+      "editDescription": "I-edit ang deskripsyon",
+      "endorsements_one": "{{count}} endorsement",
+      "endorsements_other": "{{count}} na endorsement",
+      "deleteAria": "Alisin ang kasanayang {{name}}",
+      "descriptionForAria": "Deskripsyon para sa {{name}}",
+      "descriptionEditPlaceholder": "Ilarawan ang iyong karanasan sa kasanayang ito",
+      "saveNote": "I-save ang tala",
+      "cancel": "Kanselahin",
+      "emptyTitle": "Wala pang naidagdag na kasanayan",
+      "emptySubtitle": "Idagdag ang iyong mga kasanayan sa itaas para ipakita ang iyong kadalubhasaan",
+      "catalog": {
+        "categories": {
+          "householdCleaning": "Bahay at Paglilinis",
+          "gardeningLandscaping": "Paghahalaman at Landscaping",
+          "shoppingDelivery": "Pamimili at Delivery",
+          "academicTutoring": "Akademiko at Tutoring",
+          "languagesTranslation": "Wika at Pagsasalin",
+          "fitnessWellness": "Fitness at Kalusugan",
+          "petCare": "Alaga ng Alagang Hayop",
+          "handymanRepairs": "Handyman at Pagkukumpuni",
+          "cookingFood": "Pagluluto at Pagkain",
+          "childcareBabysitting": "Pangangalaga ng Bata",
+          "administrativeTechnical": "Administratibo at Teknikal",
+          "creativeServices": "Malikhaing Serbisyo",
+          "movingHeavyLifting": "Paglipat at Pagbubuhat",
+          "eventServices": "Serbisyo sa Event"
+        },
+        "items": {
+          "houseCleaning": "Paglilinis ng Bahay",
+          "windowCleaning": "Paglilinis ng Bintana",
+          "laundryService": "Paglalaba",
+          "ironing": "Pagpaplantsa",
+          "kitchenCleaning": "Paglilinis ng Kusina",
+          "bathroomCleaning": "Paglilinis ng Banyo",
+          "gardening": "Paghahalaman",
+          "lawnMowing": "Pagggupit ng Damo",
+          "landscaping": "Landscaping",
+          "plantCare": "Pag-aalaga ng Halaman",
+          "weeding": "Pagbubunot ng Damo",
+          "hedgeTrimming": "Pagpuputol ng Bakod na Halaman",
+          "shopping": "Pamimili",
+          "groceryShopping": "Pamimili ng Grocery",
+          "deliveryService": "Serbisyo ng Delivery",
+          "errandRunning": "Pagpapatakbo ng Mandado",
+          "packagePickup": "Pagkuha ng Package",
+          "tutoring": "Tutoring",
+          "mathTutoring": "Tutoring sa Math",
+          "englishTutoring": "Tutoring sa English",
+          "languageTutoring": "Tutoring sa Wika",
+          "scienceTutoring": "Tutoring sa Science",
+          "homeworkHelp": "Tulong sa Homework",
+          "testPreparation": "Paghahanda sa Pagsusulit",
+          "englishSpeaking": "Pagsasalita ng English",
+          "translationService": "Serbisyo ng Pagsasalin",
+          "languageCoaching": "Coaching sa Wika",
+          "pronunciationTraining": "Pagsasanay sa Pagbigkas",
+          "personalTraining": "Personal Training",
+          "yogaInstruction": "Turo sa Yoga",
+          "fitnessCoaching": "Fitness Coaching",
+          "walkingCompanion": "Kasama sa Paglalakad",
+          "dogWalking": "Paglalakad ng Aso",
+          "petSitting": "Pag-aalaga ng Alagang Hayop",
+          "petGrooming": "Pag-gruum ng Alagang Hayop",
+          "petTraining": "Pagsasanay ng Alagang Hayop",
+          "handymanServices": "Serbisyong Handyman",
+          "painting": "Pagpipinta",
+          "carpentry": "Karpinterya",
+          "plumbingAssistance": "Tulong sa Plumbing",
+          "furnitureAssembly": "Pagbubuo ng Muwebles",
+          "electricalAssistance": "Tulong sa Kuryente",
+          "mealPreparation": "Paghahanda ng Pagkain",
+          "cooking": "Pagluluto",
+          "baking": "Pagbe-bake",
+          "foodDelivery": "Delivery ng Pagkain",
+          "kitchenHelp": "Tulong sa Kusina",
+          "babysitting": "Pag-aalaga ng Bata",
+          "childcare": "Pangangalaga ng Bata",
+          "afterSchoolCare": "Pangangalaga Pagkatapos ng Klase",
+          "tutoringKids": "Tutoring para sa mga Bata",
+          "dataEntry": "Data Entry",
+          "virtualAssistant": "Virtual Assistant",
+          "typingServices": "Serbisyo sa Pag-type",
+          "transcription": "Transcription",
+          "emailManagement": "Pamamahala ng Email",
+          "socialMediaManagement": "Pamamahala ng Social Media",
+          "photography": "Photography",
+          "graphicDesign": "Graphic Design",
+          "contentWriting": "Pagsulat ng Content",
+          "videoEditing": "Video Editing",
+          "movingHelp": "Tulong sa Paglipat",
+          "heavyLifting": "Pagbubuhat ng Bigat",
+          "packingService": "Serbisyo ng Pag-impake",
+          "eventSetup": "Setup ng Event",
+          "eventPlanning": "Pagpaplano ng Event",
+          "partyHostingAssistance": "Tulong sa Pag-host ng Party",
+          "decoration": "Dekorasyon"
+        }
+      }
+    },
+    "password": {
+      "heading": "Palitan ang Password",
+      "subtitle": "Ang pagpapalit ng iyong password ay magbabawi sa iba mo pang aktibong sessions at panatilihing naka-sign in ang kasalukuyang ito.",
+      "current": "Kasalukuyang Password",
+      "showCurrent": "Ipakita ang kasalukuyang password",
+      "hideCurrent": "Itago ang kasalukuyang password",
+      "otpHint": "Humiling muna ng OTP. Kakailanganin mo ang OTP mula sa iyong email bago magtakda ng bagong password.",
+      "sendingOtp": "Ipinapadala ang OTP...",
+      "resendOtp": "Ipadala ulit ang OTP",
+      "sendOtp": "Ipadala ang OTP",
+      "otpLabel": "OTP Code",
+      "otpAria": "Verification code para sa pagpapalit ng password",
+      "otpPlaceholder": "Ilagay ang 6-digit na OTP",
+      "new": "Bagong Password",
+      "showNew": "Ipakita ang bagong password",
+      "hideNew": "Itago ang bagong password",
+      "confirm": "Kumpirmahin ang Password",
+      "showConfirm": "Ipakita ang kinumpirmang password",
+      "hideConfirm": "Itago ang kinumpirmang password",
+      "discard": "I-discard",
+      "saving": "Sine-save...",
+      "save": "I-save ang Bagong Password"
+    },
+    "sessions": {
+      "heading": "Mga Aktibong Session",
+      "signOutAll": "I-sign out ang lahat ng session",
+      "subtitle": "Tingnan ang iyong kasalukuyang naka-log in na mga session at alisin ang mga hindi mo kilala.",
+      "loading": "Naglo-load ng mga session...",
+      "empty": "Walang nahanap na aktibong session.",
+      "sessionLabel": "Session {{number}}",
+      "revoke": "Bawiin",
+      "currentQuestion": "Kasalukuyang Session?",
+      "yes": "Oo",
+      "no": "Hindi",
+      "device": "Detalye ng Device",
+      "ip": "IP Address",
+      "location": "Lokasyon",
+      "lastActive": "Huling aktibidad",
+      "currentBadge": "Kasalukuyang session",
+      "signedInBadge": "Naka-sign in",
+      "unknownDevice": "Hindi kilalang device",
+      "unknown": "Hindi kilala"
+    },
+    "verification": {
+      "heading": "Pagpapatunay",
+      "statusLabel": "Status ng pagpapatunay",
+      "verified": "Napatunayan ang profile",
+      "incomplete": "Hindi kumpleto ang pagpapatunay",
+      "verifiedSubtitle": "Nakumpleto na ang lahat ng requirement.",
+      "incompleteSubtitle": "Kumpletuhin ang mga natitirang requirement sa ibaba.",
+      "percentComplete": "{{percent}}% kumpleto",
+      "progressAria": "Progreso ng pagpapatunay ng profile",
+      "stepsCompleted": "{{completed}} sa {{total}} na hakbang ang nakumpleto",
+      "loading": "Naglo-load ng status ng pagpapatunay...",
+      "sendingCode": "Ipinapadala...",
+      "resendCode": "Ipadala ulit ang code",
+      "sendCode": "Ipadala ang verification code",
+      "codePlaceholder": "Ilagay ang 6-digit na code",
+      "codeAria": "Verification code sa telepono",
+      "verifying": "Vine-verify...",
+      "confirmCode": "Kumpirmahin ang code",
+      "uploadReplacementId": "Mag-upload ng kapalit na ID",
+      "uploadId": "Mag-upload ng ID",
+      "uploadReplacement": "Mag-upload ng kapalit",
+      "uploadDocument": "Mag-upload ng Dokumento",
+      "statusLabels": {
+        "complete": "Nakumpleto",
+        "inReview": "Sinusuri",
+        "rejected": "Tinanggihan",
+        "pending": "Nakabinbin"
+      }
+    },
+    "mfa": {
+      "title": "Two-factor authentication",
+      "description": "Magdagdag ng beripikasyon gamit ang authenticator o backup code sa pag-sign in. Nilalaktawan ng trusted device ang karaniwang email code, pero nangangailangan pa rin ng beripikasyon ang setting na ito.",
+      "statusDisabled": "Naka-off",
+      "statusEnabled": "Naka-on",
+      "statusLoading": "Sinusuri...",
+      "generateNewKeyButton": "Gumawa ng bagong key",
+      "startSetupButton": "I-set up ang two-factor authentication",
+      "preparingButton": "Inihahanda...",
+      "setupHeading": "Idagdag ang key na ito sa iyong authenticator app",
+      "setupInstructions": "Buksan ang iyong authenticator app, piliin ang Add account, pagkatapos ay ilagay ang key sa ibaba. Magsisimula nang gumawa ng 6-digit na code ang app.",
+      "copyKeyButton": "Kopyahin ang key",
+      "keyHiddenNotice": "Nakatago ang iyong key para sa seguridad. Gumawa ng bagong key para makita ito ulit.",
+      "sixDigitCodeLabel": "6-digit na code",
+      "currentOrBackupCodeLabel": "Kasalukuyang code o backup code",
+      "codeInputPlaceholder": "Ilagay ang 6-digit na code",
+      "codeInputPlaceholderEnabled": "Ilagay ang code para kumpirmahin",
+      "verifyAndEnableButton": "I-verify at i-on",
+      "verifyingButton": "Vine-verify...",
+      "regenerateBackupCodesButton": "Gumawa ng bagong backup codes",
+      "disableButton": "I-off",
+      "backupCodesRemaining_one": "{{count}} backup code ang natitira.",
+      "backupCodesRemaining_other": "{{count}} backup codes ang natitira.",
+      "saveBackupCodesHeading": "I-save ang iyong backup codes",
+      "saveBackupCodesInstructions": "Isang beses lang gumagana ang bawat code. Itago ang mga ito sa ligtas na lugar, dahil ito lang ang paraan para makapasok kung mawala ang iyong authenticator app.",
+      "toast": {
+        "loadFailed": "Hindi na-load ang iyong two-factor settings.",
+        "setupCreated": "Handa na ang setup key. Idagdag ito sa iyong authenticator app.",
+        "setupFailed": "Hindi nasimulan ang two-factor setup.",
+        "enterAuthenticatorCode": "Ilagay ang code mula sa iyong authenticator app.",
+        "enableSuccess": "Naka-on na ang two-factor authentication.",
+        "enableFailed": "Hindi na-on ang two-factor authentication.",
+        "enterCurrentCode": "Ilagay ang iyong kasalukuyang code para magpatuloy.",
+        "disableSuccess": "Naka-off na ang two-factor authentication.",
+        "disableFailed": "Hindi na-off ang two-factor authentication.",
+        "regenerateSuccess": "Nakagawa ng bagong backup codes.",
+        "regenerateFailed": "Hindi nakagawa ng bagong backup codes.",
+        "keyCopied": "Nakopya ang key."
+      }
+    },
+    "deleteAccount": {
+      "title": "Burahin ang account",
+      "description": "Permanenteng alisin ang iyong account, profile, at kasaysayan ng trabaho. Hindi ito maibabalik.",
+      "currentPasswordLabel": "Kasalukuyang Password",
+      "typeDeleteLabel": "I-type ang DELETE para kumpirmahin",
+      "confirmWarning": "Permanenteng buburahin nito ang iyong account at ang lahat ng nasa loob nito. Walang paraan para mabawi ito.",
+      "deleteButton": "Burahin ang account",
+      "superadminDisabled": "Hindi maaaring burahin ang mga Superadmin account para maprotektahan ang pagmamay-ari at access ng platform.",
+      "deletingButton": "Binubura...",
+      "confirmButton": "Burahin ang aking account",
+      "cancelButton": "Kanselahin",
+      "toast": {
+        "enterPassword": "Ilagay ang iyong kasalukuyang password.",
+        "typeDeleteConfirm": "I-type ang DELETE para kumpirmahin.",
+        "superadminProtected": "Hindi maaaring burahin ang mga Superadmin account.",
+        "deleteSuccess": "Nabura na ang iyong account.",
+        "deleteFailed": "Hindi nabura ang iyong account."
+      }
+    },
+    "resume": {
+      "title": "CV / Resume",
+      "subtitle": "Nakikita ito ng mga employer kapag nag-apply ka. PDF, DOC, o DOCX.",
+      "uploadPrompt": "Mag-upload ng iyong CV o resume para mas mabilis mag-apply.",
+      "replacePrompt": "Kailangan mong i-update? Mag-upload ng bagong file para palitan ang kasalukuyan.",
+      "chooseFileButton": "Pumili ng file",
+      "chooseFileAria": "Pumili ng CV o resume na file na i-a-upload",
+      "chooseReplacementButton": "Pumili ng kapalit",
+      "chooseReplacementAria": "Pumili ng kapalit na CV o resume na file",
+      "uploadingButton": "Ina-upload...",
+      "workingButton": "Ginagawa...",
+      "uploadedLabel": "Na-upload na CV / Resume",
+      "uploadedStatus": "Na-upload ang {{fileName}}.",
+      "removedStatus": "Naalis ang CV / Resume.",
+      "fileSizeKb": "{{size}} KB",
+      "viewUploaded": "Tingnan ang na-upload na file",
+      "downloadTitle": "I-download",
+      "downloadAria": "I-download ang iyong CV o resume",
+      "deleteAria": "Alisin ang iyong CV o resume",
+      "removeDialog": {
+        "title": "Alisin ang CV / Resume?",
+        "description": "Hindi na makikita ng mga employer ang CV mo kapag nag-apply ka. Puwede kang mag-upload ng bago anumang oras.",
+        "confirmLabel": "Alisin"
+      },
+      "toast": {
+        "uploadSuccess": "Na-upload ang CV / Resume.",
+        "uploadFailed": "Hindi na-upload ang iyong file.",
+        "deleteSuccess": "Naalis ang CV / Resume.",
+        "deleteFailed": "Hindi naalis ang iyong file."
+      }
+    },
+    "deleteExperienceDialog": {
+      "title": "Alisin ang karanasan sa trabaho",
+      "description": "Alisin ang {{title}} sa iyong profile?",
+      "fallbackTitle": "ang tungkuling ito",
+      "confirmLabel": "Alisin ang karanasan"
+    },
+    "toast": {
+      "photoUploaded": "Matagumpay na na-upload ang larawan sa profile!",
+      "photoUploadFailed": "Hindi na-upload ang larawan sa profile",
+      "photoRemoved": "Matagumpay na naalis ang larawan sa profile!",
+      "photoRemoveFailed": "Hindi naalis ang larawan sa profile",
+      "locationOptionsUnavailable": "Hindi available ang mga opsyon sa lokasyon sa Pilipinas. Subukan muli bago baguhin ang iyong lokasyon.",
+      "barangayOptionsUnavailable": "Hindi available ang mga opsyon sa barangay. Piliin ulit ang lungsod o subukan muli sa madaling panahon.",
+      "loadProfileFailed": "Hindi na-load ang profile.",
+      "loadSessionsFailed": "Hindi na-load ang mga aktibong session",
+      "loadVerificationFailed": "Hindi na-load ang status ng pagpapatunay",
+      "profileStillLoading": "Naglo-load pa ang iyong profile. Maghintay at subukan ulit.",
+      "waitForLocationData": "Maghintay hanggang matapos mag-load ang mga opsyon sa lokasyon sa Pilipinas.",
+      "locationDataUnavailableForSave": "Hindi available ang mga opsyon sa lokasyon, kaya hindi pa masusuri ang mga pagbabago sa lokasyon. Subukan muling i-load ang mga ito.",
+      "selectValidLocation": "Pumili ng wastong Probinsya, Lungsod/Munisipyo, at Barangay mula sa mga suhestiyon.",
+      "noProfileChanges": "Walang pagbabago sa profile na i-se-save.",
+      "profileSaved": "Matagumpay na na-save ang personal na impormasyon!",
+      "profileSaveFailed": "Hindi na-save ang personal na impormasyon.",
+      "skillNameRequired": "Pumili o maglagay ng pangalan ng kasanayan",
+      "skillNameTooLong": "Ang pangalan ng kasanayan ay dapat {{limit}} character o mas kaunti.",
+      "skillDescriptionTooLong": "Ang deskripsyon ng kasanayan ay dapat {{limit}} character o mas kaunti.",
+      "skillLimitReached": "Maaari kang magdagdag ng hanggang 50 kasanayan.",
+      "skillSaved": "Na-save ang {{name}} sa iyong mga kasanayan!",
+      "skillAddFailed": "Hindi naidagdag ang kasanayan",
+      "skillDescriptionUpdated": "Matagumpay na na-update ang deskripsyon ng kasanayan!",
+      "skillDescriptionUpdateFailed": "Hindi na-update ang deskripsyon ng kasanayan",
+      "skillRemoved": "Matagumpay na naalis ang kasanayan!",
+      "skillRemoveFailed": "Hindi naalis ang kasanayan",
+      "experienceRequiredFields": "Kinakailangan ang titulo ng trabaho, kompanya o kliyente, at petsa ng simula.",
+      "experienceEndDateRequired": "Magdagdag ng petsa ng pagtatapos o markahan bilang kasalukuyang tungkulin.",
+      "experienceFutureDate": "Hindi maaaring nasa hinaharap ang petsa ng karanasan sa trabaho.",
+      "experienceEndBeforeStart": "Hindi maaaring mauna ang petsa ng pagtatapos sa petsa ng simula.",
+      "experienceFieldTooLong": "May isa o higit pang field ng karanasan sa trabaho na lumagpas sa pinapayagang haba.",
+      "experienceLimitReached": "Maaari kang magdagdag ng hanggang 25 entry ng karanasan sa trabaho.",
+      "experienceUpdated": "Na-update ang karanasan sa trabaho.",
+      "experienceAdded": "Naidagdag ang karanasan sa trabaho.",
+      "experienceSaveFailed": "Hindi na-save ang karanasan sa trabaho.",
+      "experienceRemoved": "Naalis ang karanasan sa trabaho.",
+      "experienceRemoveFailed": "Hindi naalis ang karanasan sa trabaho.",
+      "currentPasswordRequired": "Ilagay ang iyong kasalukuyang password",
+      "otpSent": "Naipadala ang OTP sa iyong email",
+      "otpSendFailed": "Hindi naipadala ang OTP",
+      "otpRequestFirst": "Humiling muna ng OTP",
+      "otpCodeRequired": "Ilagay ang OTP code",
+      "fillAllFields": "Punan ang lahat ng field",
+      "passwordsDoNotMatch": "Hindi magkatugma ang bagong password",
+      "passwordChanged": "Matagumpay na napalitan ang password!",
+      "passwordChangeFailed": "Hindi napalitan ang password",
+      "changesDiscarded": "Na-discard ang mga pagbabago",
+      "sessionRevoked": "Matagumpay na binawi ang session",
+      "sessionRevokeFailed": "Hindi nabawi ang session",
+      "allSessionsRevoked": "Nabawi ang lahat ng session. Malalabas ka sa system.",
+      "allSessionsRevokeFailed": "Hindi nabawi ang lahat ng session",
+      "devCode": "Development code: {{code}}",
+      "codeSentTo": "Naipadala ang code sa {{phone}}",
+      "verificationCodeSent": "Naipadala ang verification code",
+      "verificationCodeSendFailed": "Hindi naipadala ang verification code",
+      "enterVerificationCode": "Ilagay ang verification code",
+      "phoneVerified": "Matagumpay na na-verify ang telepono",
+      "phoneVerifyFailed": "Hindi na-verify ang telepono",
+      "identityUploaded": "Matagumpay na na-upload ang dokumento ng pagkakakilanlan",
+      "identityUploadFailed": "Hindi na-upload ang dokumento ng pagkakakilanlan",
+      "addressUploaded": "Matagumpay na na-upload ang dokumento ng address",
+      "addressUploadFailed": "Hindi na-upload ang dokumento ng address"
+    }
+  }
+}

@@ -1,0 +1,462 @@
+import { getWalletTransactionStatus as financialReportStatusKey } from '../../lib/transactionStatus';
+import { financialReportTypeKey } from '../../lib/financialReport';
+import { LifecycleReports } from '../../components/LifecycleReports';
+import { useEffect, useState } from "react";
+import {
+  Download,
+  FileText,
+  Briefcase,
+  PhilippinePeso,
+  Users,
+  ClipboardList,
+  Calendar,
+  Check,
+  ChevronDown,
+} from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { AdminGate } from "./admin/AdminGate";
+import { useAdminData } from "../../hooks/useAdminData";
+import { toast } from "../../lib/toast";
+import { formatDate } from "../../lib/formatters";
+
+const REPORT_STORAGE_KEY = "admin_reports";
+
+type ReportType = "users" | "jobs" | "transactions" | "applications";
+
+type StoredReport = {
+  id: string;
+  type: ReportType;
+  title: string;
+  fromDate?: string;
+  toDate?: string;
+  format: "CSV" | "JSON";
+  createdAt: string;
+  status: "completed";
+};
+
+function AdminReportsContent() {
+  const { t } = useTranslation("admin");
+  const { t: common } = useTranslation("common");
+  const { isLoading, loadError, users, jobs, transactions } = useAdminData();
+  const [reportType, setReportType] = useState<ReportType>("users");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [exportFormat, setExportFormat] = useState<"CSV" | "JSON">("CSV");
+  const [showFormatMenu, setShowFormatMenu] = useState(false);
+  const [recentReports, setRecentReports] = useState<StoredReport[]>([]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem(REPORT_STORAGE_KEY);
+    if (!stored) return;
+    try {
+      const parsed = JSON.parse(stored) as StoredReport[];
+      setRecentReports(parsed);
+    } catch {
+      setRecentReports([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(REPORT_STORAGE_KEY, JSON.stringify(recentReports.slice(0, 6)));
+  }, [recentReports]);
+
+  useEffect(() => {
+    if (!showFormatMenu) return;
+    const closeMenu = () => setShowFormatMenu(false);
+    window.addEventListener("click", closeMenu);
+    return () => window.removeEventListener("click", closeMenu);
+  }, [showFormatMenu]);
+
+  const reportCards = [
+    {
+      id: "users" as const,
+      title: t("reports.cards.users.title"),
+      description: t("reports.cards.users.description"),
+      icon: <Users className="w-5 h-5 text-brand" />,
+      accent: "bg-brand/[0.06]",
+    },
+    {
+      id: "jobs" as const,
+      title: t("reports.cards.jobs.title"),
+      description: t("reports.cards.jobs.description"),
+      icon: <Briefcase className="w-5 h-5 text-[#10B981]" />,
+      accent: "bg-[#ECFDF3]",
+    },
+    {
+      id: "transactions" as const,
+      title: t("reports.cards.transactions.title"),
+      description: t("reports.cards.transactions.description"),
+      icon: <PhilippinePeso className="w-5 h-5 text-[#F59E0B]" />,
+      accent: "bg-[#FEF3C7]",
+    },
+    {
+      id: "applications" as const,
+      title: t("reports.cards.applications.title"),
+      description: t("reports.cards.applications.description"),
+      icon: <ClipboardList className="w-5 h-5 text-[#A855F7]" />,
+      accent: "bg-[#F3E8FF]",
+    },
+  ];
+
+  const getDateFromId = (id?: string) => {
+    if (!id || id.length < 8) return null;
+    const timestamp = parseInt(id.slice(0, 8), 16) * 1000;
+    return new Date(timestamp);
+  };
+
+  const withinRange = (date?: Date | null, rangeFrom?: string, rangeTo?: string) => {
+    if (!date) return false;
+    if (!rangeFrom && !rangeTo) return true;
+    const start = rangeFrom ? new Date(`${rangeFrom}T00:00:00+08:00`) : null;
+    const end = rangeTo ? new Date(`${rangeTo}T23:59:59.999+08:00`) : null;
+    if (start && date < start) return false;
+    if (end && date > end) return false;
+    return true;
+  };
+
+  const buildReportData = (type: ReportType, rangeFrom: string, rangeTo: string) => {
+    if (type === "users") {
+      return users
+        .map((user) => {
+          const date = user.createdAt ? new Date(user.createdAt) : getDateFromId(user._id);
+          return {
+            id: user._id,
+            name: `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email,
+            email: user.email,
+            role: user.role || "user",
+            status: user.status || "active",
+            joined: date ? date.toLocaleDateString() : "—",
+            date,
+          };
+        })
+        .filter((row) => withinRange(row.date, rangeFrom, rangeTo));
+    }
+
+    if (type === "jobs") {
+      return jobs
+        .map((job) => {
+          const date = job.createdAt ? new Date(job.createdAt) : getDateFromId(job._id);
+          return {
+            id: job._id,
+            title: job.title,
+            status: job.status || "Available",
+            salary: job.salary || "—",
+            applicants: job.applicantsCount ?? job.applicants?.length ?? 0,
+            posted: date ? date.toLocaleDateString() : "—",
+            date,
+          };
+        })
+        .filter((row) => withinRange(row.date, rangeFrom, rangeTo));
+    }
+
+    if (type === "transactions") {
+      return transactions
+        .map((transaction) => {
+          const date = transaction.createdAt ? new Date(transaction.createdAt) : null;
+          const sender = transaction.sender && typeof transaction.sender === "object" ? transaction.sender : null;
+          const receiver = transaction.receiver && typeof transaction.receiver === "object" ? transaction.receiver : null;
+          const userLabel = (value: typeof sender) => value
+            ? `${value.firstName || ""} ${value.lastName || ""}`.trim() || value.email || value._id || common("financialReports.notRecorded")
+            : common("financialReports.notRecorded");
+          return {
+            id: transaction._id,
+            type: common(`financialReports.types.${financialReportTypeKey(transaction)}`),
+            transactionTypeCode: transaction.type,
+            status: common(`wallet.transactionStatus.${financialReportStatusKey(transaction)}`),
+            ledgerStatusCode: transaction.status || '',
+            withdrawalStatusCode: transaction.type === 'PAYOUT' ? transaction.payoutRequest?.status || '' : '',
+            amount: Number(transaction.amount || 0),
+            currency: 'PHP',
+            balanceTarget: common(`financialReports.accounts.${transaction.balanceTarget || 'UNKNOWN'}`),
+            balanceTargetCode: transaction.balanceTarget || '',
+            sender: userLabel(sender),
+            receiver: userLabel(receiver),
+            reference: transaction.reference || "",
+            created: date ? new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', dateStyle: 'medium', timeStyle: 'medium' }).format(date) : "—",
+            timezone: 'Asia/Manila',
+            date,
+          };
+        })
+        .filter((row) => withinRange(row.date, rangeFrom, rangeTo));
+    }
+
+    return jobs
+      .map((job) => {
+        const date = job.createdAt ? new Date(job.createdAt) : getDateFromId(job._id);
+        return {
+          id: job._id,
+          jobTitle: job.title,
+          applicants: job.applicantsCount ?? job.applicants?.length ?? 0,
+          status: job.status || "Available",
+          posted: date ? date.toLocaleDateString() : "—",
+          date,
+        };
+      })
+      .filter((row) => withinRange(row.date, rangeFrom, rangeTo));
+  };
+
+  const generateFile = (options?: {
+    type?: ReportType;
+    rangeFrom?: string;
+    rangeTo?: string;
+    format?: "CSV" | "JSON";
+    skipSave?: boolean;
+  }) => {
+    const type = options?.type ?? reportType;
+    const rangeFrom = options?.rangeFrom ?? fromDate;
+    const rangeTo = options?.rangeTo ?? toDate;
+    const format = options?.format ?? exportFormat;
+    if (rangeFrom && rangeTo && rangeFrom > rangeTo) {
+      toast.error(t("reports.toast.invalidRange"));
+      return;
+    }
+    const data = buildReportData(type, rangeFrom, rangeTo);
+
+    if (data.length === 0) {
+      toast.error(t("reports.toast.noData"));
+      return;
+    }
+
+    const safeFrom = rangeFrom || "all";
+    const safeTo = rangeTo || "all";
+    const title = reportCards.find((card) => card.id === type)?.title || t("reports.fallbackTitle");
+    const fileName = `${type}-${safeFrom}-${safeTo}.${format.toLowerCase()}`;
+
+    let content = "";
+    if (format === "JSON") {
+      content = JSON.stringify(data.map(({ date: _date, ...rest }) => rest), null, 2);
+    } else {
+      const rows = data.map(({ date: _date, ...rest }) => rest);
+      const headers = Object.keys(rows[0] || {});
+      const csvCell = (value: unknown) => {
+        let text = String(value ?? "");
+        if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+        return `"${text.replace(/"/g, '""')}"`;
+      };
+      content = [headers.map(csvCell).join(",")]
+        .concat(
+          rows.map((row) =>
+            headers
+              .map((key) => csvCell((row as Record<string, unknown>)[key]))
+              .join(","),
+          ),
+        )
+        .join("\n");
+    }
+
+    const blob = new Blob([content], { type: format === "JSON" ? "application/json" : "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+
+    if (!options?.skipSave) {
+      const newReport: StoredReport = {
+        id: `${type}-${Date.now()}`,
+        type,
+        title,
+        fromDate: rangeFrom,
+        toDate: rangeTo,
+        format,
+        createdAt: new Date().toISOString(),
+        status: "completed",
+      };
+
+      setRecentReports((prev) => [newReport, ...prev].slice(0, 6));
+      toast.success(t("reports.toast.generateSuccess"));
+    }
+  };
+
+  const recentLabel = (report: StoredReport) => {
+    const created = new Date(report.createdAt);
+    return formatDate(created, { year: "numeric", month: "short", day: "numeric" });
+  };
+
+  return (
+    <div className="max-w-[1341px] mx-auto space-y-6">
+      <LifecycleReports />
+      {loadError && (
+        <div className="bg-[#FEE2E2] text-[#991B1B] border border-[#FECACA] px-4 py-3 rounded-xl text-body-sm">
+          {loadError}
+        </div>
+      )}
+
+      <section className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 space-y-6">
+        <div>
+          <h3 className="text-section font-semibold text-[#111827]">{t("reports.generate.title")}</h3>
+          <p className="text-body-sm text-[#6B7280] mt-1">
+            {t("reports.generate.subtitle")}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          {reportCards.map((card) => {
+            const isActive = card.id === reportType;
+            return (
+              <button
+                key={card.id}
+                type="button"
+                onClick={() => setReportType(card.id)}
+                className={`text-left border rounded-card p-4 transition-all ${
+                  isActive
+                    ? "border-brand bg-brand/[0.06]"
+                    : "border-[#E5E7EB] bg-white hover:border-[#CBD5F5]"
+                }`}
+              >
+                <div className={`w-10 h-10 rounded-xl ${card.accent} flex items-center justify-center mb-4`}>
+                  {card.icon}
+                </div>
+                <p className="text-[15px] font-semibold text-[#111827]">{card.title}</p>
+                <p className="text-caption text-[#6B7280] mt-1">{card.description}</p>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div>
+            <label htmlFor="report-from-date" className="text-caption text-[#6B7280] block mb-2">{t("reports.generate.fromDate")}</label>
+            <div className="relative">
+              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#94A3B8]" />
+              <input
+                id="report-from-date"
+                type="date"
+                value={fromDate}
+                onChange={(event) => setFromDate(event.target.value)}
+                className="w-full h-11 rounded-xl border border-[#E5E7EB] pl-9 pr-3 text-body-sm text-[#111827] focus:outline-none focus:ring-2 focus:ring-brand"
+              />
+            </div>
+          </div>
+          <div>
+            <label htmlFor="report-to-date" className="text-caption text-[#6B7280] block mb-2">{t("reports.generate.toDate")}</label>
+            <div className="relative">
+              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#94A3B8]" />
+              <input
+                id="report-to-date"
+                type="date"
+                value={toDate}
+                onChange={(event) => setToDate(event.target.value)}
+                className="w-full h-11 rounded-xl border border-[#E5E7EB] pl-9 pr-3 text-body-sm text-[#111827] focus:outline-none focus:ring-2 focus:ring-brand"
+              />
+            </div>
+          </div>
+          <div>
+            <span id="report-format-label" className="text-caption text-[#6B7280] block mb-2">{t("reports.generate.exportFormat")}</span>
+            <div className="relative">
+              <button
+                aria-labelledby="report-format-label"
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setShowFormatMenu((prev) => !prev);
+                }}
+                className="w-full h-11 rounded-xl border border-[#E5E7EB] px-3 text-body-sm text-[#111827] flex items-center justify-between"
+              >
+                {exportFormat}
+                <ChevronDown className="w-4 h-4 text-[#94A3B8]" />
+              </button>
+              {showFormatMenu && (
+                <div className="absolute z-10 mt-2 w-full bg-white border border-[#E5E7EB] rounded-xl shadow-lg overflow-hidden">
+                  {["CSV", "JSON"].map((format) => (
+                    <button
+                      key={format}
+                      type="button"
+                      onClick={() => {
+                        setExportFormat(format as "CSV" | "JSON");
+                        setShowFormatMenu(false);
+                      }}
+                      className={`w-full flex items-center gap-2 px-3 py-2 text-body-sm ${
+                        exportFormat === format
+                          ? "bg-[#10B981] text-white"
+                          : "text-[#111827] hover:bg-[#F8FAFC]"
+                      }`}
+                    >
+                      {exportFormat === format && <Check className="w-4 h-4" />}
+                      {format}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => generateFile()}
+          disabled={isLoading}
+          className="inline-flex items-center gap-2 rounded-card bg-brand text-white px-5 py-3 text-body-sm font-semibold shadow-sm hover:opacity-90 disabled:opacity-60"
+        >
+          <Download className="w-4 h-4" />
+          {t("reports.generate.submit")}
+        </button>
+      </section>
+
+      <section className="bg-white rounded-[20px] border border-[#E5E7EB] p-6 space-y-4">
+        <div>
+          <h3 className="text-section font-semibold text-[#111827]">{t("reports.recent.title")}</h3>
+          <p className="text-body-sm text-[#6B7280] mt-1">{t("reports.recent.subtitle")}</p>
+        </div>
+
+        <div className="space-y-3">
+          {recentReports.length === 0 && (
+            <div className="text-body-sm text-[#9CA3AF]">{t("reports.recent.empty")}</div>
+          )}
+          {recentReports.map((report) => (
+            <div
+              key={report.id}
+              className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 p-4 border border-[#E5E7EB] rounded-card"
+            >
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-xl bg-[#F1F5F9] flex items-center justify-center">
+                  <FileText className="w-5 h-5 text-slate-500" />
+                </div>
+                <div>
+                  <p className="text-body font-semibold text-[#111827]">
+                    {report.title} {report.fromDate || report.toDate ? `(${report.fromDate || ""}${
+                      report.fromDate && report.toDate ? " - " : ""
+                    }${report.toDate || ""})` : ""}
+                  </p>
+                  <p className="text-caption text-[#6B7280]">{t("reports.recent.generatedOn", { date: recentLabel(report) })}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[11px] font-semibold bg-[#ECFDF3] text-[#065F46]">
+                  <Check className="w-4 h-4" />
+                  {t("reports.recent.statusCompleted")}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    generateFile({
+                      type: report.type,
+                      rangeFrom: report.fromDate || "",
+                      rangeTo: report.toDate || "",
+                      format: report.format,
+                      skipSave: true,
+                    });
+                  }}
+                  className="w-10 h-10 rounded-xl border border-[#E5E7EB] flex items-center justify-center hover:bg-[#F8FAFC]"
+                >
+                  <Download className="w-4 h-4 text-slate-500" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export function AdminReports() {
+  return (
+    <AdminGate permission="analytics.view">
+      <AdminReportsContent />
+    </AdminGate>
+  );
+}

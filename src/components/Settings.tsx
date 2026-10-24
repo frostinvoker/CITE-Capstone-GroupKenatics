@@ -1,0 +1,3403 @@
+import { useEffect, useRef, useState } from "react";
+import { Eye, EyeOff, Upload, Trash2, CheckCircle2, ChevronDown, Clock, Circle, XCircle, type LucideIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { toast } from "../lib/toast";
+import { toAbsoluteAssetUrl } from "../lib/assetUrl";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import {
+  getProfile,
+  updateProfile,
+  uploadAvatar,
+  deleteAvatar,
+  requestPasswordChangeOtp,
+  getStaffSecondaryEmail,
+  type StaffSecondaryEmailStatus,
+  confirmPasswordChangeWithOtp,
+  getSessions,
+  revokeSession,
+  revokeAllSessions,
+  cleanupInactiveSessions,
+  getTrustedDevices,
+  revokeTrustedDevice,
+  getVerificationStatus,
+  requestPhoneVerificationOtp,
+  confirmPhoneVerificationOtp,
+  uploadAddressDocument,
+  addWorkExperience,
+  updateWorkExperience,
+  deleteWorkExperience,
+  uploadExperienceMedia,
+  deleteExperienceMedia,
+  addProfileSkill,
+  updateProfileSkill,
+  deleteProfileSkill,
+  addInternship,
+  updateInternship,
+  deleteInternship,
+  addCertificate,
+  updateCertificate,
+  deleteCertificate,
+  type WorkExperience,
+  type Internship,
+  type Certificate,
+} from "../services/api";
+import { useAuth } from "../contexts/AuthContext";
+import { DeleteAccountCard } from "./settings/DeleteAccountCard";
+import { EmployerPaymentMethodsSection } from "./settings/EmployerPaymentMethodsSection";
+import { EmployerPrivacyCard } from "./settings/EmployerPrivacyCard";
+import { MfaSettingsCard } from "./settings/MfaSettingsCard";
+import { StaffSecondaryEmail } from "./settings/StaffSecondaryEmail";
+import { WorkerResumeSection } from "./settings/WorkerResumeSection";
+import { LanguageSettingsCard } from "./settings/LanguageSettingsCard";
+import { SettingsTabList } from "./settings/SettingsTabList";
+import { ProfilePhotoEditor } from "./settings/ProfilePhotoEditor";
+import { Card, Dialog, ConfirmDialog } from "./ui";
+import { ROUTES } from "../utils/routes";
+import IdAnalyzerVerifier from "./IdAnalyzerVerifier";
+import {
+  normalizeFullName,
+  normalizePhone,
+} from "../lib/authValidation";
+import {
+  PROFILE_LIMITS,
+  validateAvatarFile,
+  validateExperienceMediaFile,
+  validateProfileDetails,
+  type ProfileValidationField,
+} from "../lib/profileValidation";
+import {
+  getPhilippineBarangays,
+  getPhilippineLocationOptions,
+  type BarangayOption,
+  type CityOption,
+  type ProvinceOption,
+} from "../services/philippineLocations";
+
+type TabType = "account" | "privacy" | "payments";
+type AccountTab = "personal" | "experience" | "resume";
+/**
+ * Security & Privacy is split the same way Account is. Each sub-tab owns one
+ * concern: how you sign in, who you have proven you are, and what others can
+ * see. They share the single `?tab=` param with every other tab, so each id
+ * doubles as its own URL token — `?tab=verification` lands straight on the
+ * verification pane, which is what the employer dashboard and worker profile
+ * link to.
+ */
+type PrivacyTab = "security" | "verification" | "privacy";
+
+// Ids only -- the labels are resolved against `settings.tabs` /
+// `settings.accountTabs` inside the component, where `t` is available. Both
+// locales already carry the strings; they were simply never wired up.
+const accountTabConfig: AccountTab[] = ["personal", "experience", "resume"];
+
+const privacyTabConfig: PrivacyTab[] = ["security", "verification", "privacy"];
+
+const mainTabConfig: TabType[] = ["account", "privacy", "payments"];
+
+const mapTabParam = (value: string | null): TabType | null => {
+  if (!value) return null;
+  if (value === "account") return "account";
+  if (value === "privacy") return "privacy";
+  if (value === "payments" || value === "payment-methods") return "payments";
+  if (["personal", "experience", "resume", "cv"].includes(value)) return "account";
+  // `security` and `verification` are both aliases now. Identity verification
+  // used to be its own top-level tab and is linked to from the employer
+  // dashboard and the worker profile (`?tab=verification`); it lives inside
+  // Security & Privacy, so those links resolve here rather than 404ing into the
+  // fallback and dumping the user on the Account tab.
+  if (value === "security" || value === "verification") return "privacy";
+  return null;
+};
+
+const mapAccountTab = (value: string | null): AccountTab | null => {
+  if (!value) return null;
+  if (value === "personal") return "personal";
+  if (value === "experience") return "experience";
+  if (value === "resume") return "resume";
+  if (value === "cv") return "resume";
+  return null;
+};
+
+const mapPrivacyTab = (value: string | null): PrivacyTab | null => {
+  if (!value) return null;
+  if (value === "security") return "security";
+  if (value === "verification") return "verification";
+  if (value === "privacy") return "privacy";
+  return null;
+};
+
+type VerificationStatus = "complete" | "pending" | "in-review" | "rejected";
+
+interface VerificationStep {
+  id: string;
+  title: string;
+  description: string;
+  status: VerificationStatus;
+}
+
+// One record per status. Previously the badge colors, the labels, the icon and the icon
+// background were four separate lookups for the same four states — the last two as inline
+// nested ternaries at the call site.
+const verificationStatusMeta: Record<
+  VerificationStatus,
+  { label: string; badge: string; iconBg: string; iconColor: string; Icon: LucideIcon }
+> = {
+  complete: {
+    label: "Completed",
+    badge: "bg-[#DCFCE7] text-[#166534]",
+    iconBg: "bg-[#DCFCE7]",
+    iconColor: "text-[#16A34A]",
+    Icon: CheckCircle2,
+  },
+  "in-review": {
+    label: "In Review",
+    badge: "bg-[#FEF3C7] text-[#92400E]",
+    iconBg: "bg-[#FEF3C7]",
+    iconColor: "text-[#D97706]",
+    Icon: Clock,
+  },
+  // Rejected used to share the plain `Circle` glyph with pending, so a failure was only
+  // distinguishable by color.
+  rejected: {
+    label: "Rejected",
+    badge: "bg-[#FEE2E2] text-[#991B1B]",
+    iconBg: "bg-[#FEE2E2]",
+    iconColor: "text-[#DC2626]",
+    Icon: XCircle,
+  },
+  pending: {
+    label: "Pending",
+    badge: "bg-slate-100 text-slate-600",
+    iconBg: "bg-slate-100",
+    iconColor: "text-slate-400",
+    Icon: Circle,
+  },
+};
+
+// The server returns steps as a flat list (verificationController.js). Grouping is a purely
+// client-side concern, keyed on step.id. Any id not listed here still renders — it falls into
+// the trailing "other" group rather than disappearing.
+const verificationActionClass =
+  "mt-3 inline-flex min-h-11 items-center justify-center rounded-lg bg-brand px-4 text-xs font-semibold text-white transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 disabled:opacity-60";
+
+const verificationSecondaryActionClass =
+  "inline-flex min-h-11 items-center justify-center rounded-lg border border-brand px-4 text-xs font-semibold text-brand transition hover:bg-brand/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 disabled:opacity-60";
+
+const VERIFICATION_GROUPS: Array<{ key: string; label: string; stepIds: string[] }> = [
+  { key: "contact", label: "Contact details", stepIds: ["email", "phone"] },
+  { key: "documents", label: "Identity documents", stepIds: ["identity", "address"] },
+];
+
+function groupVerificationSteps(steps: VerificationStep[]) {
+  const claimed = new Set(VERIFICATION_GROUPS.flatMap((group) => group.stepIds));
+  const groups = VERIFICATION_GROUPS.map((group) => ({
+    key: group.key,
+    label: group.label,
+    steps: group.stepIds
+      .map((id) => steps.find((step) => step.id === id))
+      .filter((step): step is VerificationStep => Boolean(step)),
+  }));
+  const ungrouped = steps.filter((step) => !claimed.has(step.id));
+  if (ungrouped.length > 0) {
+    groups.push({ key: "other", label: "Other requirements", steps: ungrouped });
+  }
+  return groups.filter((group) => group.steps.length > 0);
+}
+
+const addressSuggestions = [
+  "Near City Hall",
+  "Near Public Market",
+  "Near Barangay Hall",
+  "Near Transport Terminal",
+  "Near School Zone",
+  "Near Business District",
+];
+
+function ProfilePhotoSelector({
+  avatarUrl,
+  isSubmitting,
+  onUpload,
+  onDelete,
+}: {
+  avatarUrl: string | null;
+  isSubmitting: boolean;
+  onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onDelete: () => void | Promise<void>;
+}) {
+  return (
+    <div>
+      <p className="mb-2 block text-body font-medium text-slate-600">Profile photo</p>
+      {avatarUrl ? (
+        <div className="flex items-center gap-4">
+          <img
+            src={avatarUrl}
+            alt="Profile"
+            className="h-24 w-24 rounded-xl border-2 border-slate-200 object-cover"
+          />
+          <div className="flex flex-col gap-2">
+            <label className="flex cursor-pointer items-center gap-2 rounded-control border border-brand bg-white px-6 py-2 text-body font-semibold text-brand transition-all hover:bg-brand/[0.06]">
+              <Upload className="h-4 w-4" />
+              Change photo
+              <input
+                type="file"
+                accept=".jpg,.jpeg,.png,.gif,.webp"
+                onChange={onUpload}
+                disabled={isSubmitting}
+                aria-label="Choose a new profile photo"
+                className="sr-only"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={isSubmitting}
+              aria-busy={isSubmitting}
+              className="rounded-control border border-[#FCA5A5] px-6 py-2 text-body font-medium text-[#EF4444] transition-all hover:bg-[#FEE2E2]"
+            >
+              Remove photo
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex cursor-pointer items-center gap-2 rounded-control bg-brand px-6 py-3 font-semibold text-white transition-all hover:opacity-90 focus-within:ring-2 focus-within:ring-brand focus-within:ring-offset-2">
+            <Upload className="h-4 w-4 text-white" />
+            <span className="text-white">Upload your photo</span>
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.gif,.webp"
+              onChange={onUpload}
+              disabled={isSubmitting}
+              aria-label="Choose a profile photo"
+              className="sr-only"
+            />
+          </label>
+          <span className="text-body-sm text-slate-500">(jpg/png format)</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface SkillItem {
+  id: string;
+  name: string;
+  description?: string;
+  endorsements?: number;
+}
+
+type WorkExperienceItem = WorkExperience & { id: string };
+
+const emptyExperienceDraft: Omit<WorkExperience, "_id" | "id"> = {
+  title: "",
+  company: "",
+  location: "",
+  startDate: "",
+  endDate: "",
+  current: false,
+  description: "",
+};
+
+const toMonthInput = (value?: string | null) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 7);
+  return date.toISOString().slice(0, 7);
+};
+
+const formatExperienceMonth = (value?: string | null) => {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? String(value)
+    : date.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+};
+
+const mapWorkExperiences = (items: WorkExperience[] = []): WorkExperienceItem[] =>
+  items.map((item) => ({ ...item, id: item.id || item._id || "" })).filter((item) => item.id);
+
+type InternshipItem = Internship & { id: string };
+
+const emptyInternshipDraft: Omit<Internship, "_id" | "id"> = {
+  title: "",
+  company: "",
+  location: "",
+  startDate: "",
+  endDate: "",
+  current: false,
+  description: "",
+};
+
+const mapInternships = (items: Internship[] = []): InternshipItem[] =>
+  items.map((item) => ({ ...item, id: item.id || item._id || "" })).filter((item) => item.id);
+
+type CertificateItem = Certificate & { id: string };
+
+const emptyCertificateDraft: Omit<Certificate, "_id" | "id"> = {
+  name: "",
+  issuer: "",
+  issueDate: "",
+  expiryDate: "",
+  credentialId: "",
+  credentialUrl: "",
+};
+
+const mapCertificates = (items: Certificate[] = []): CertificateItem[] =>
+  items.map((item) => ({ ...item, id: item.id || item._id || "" })).filter((item) => item.id);
+
+interface SessionInfo {
+  id: string;
+  current: boolean;
+  device: string;
+  location: string;
+  ip: string;
+  lastActive: string;
+}
+
+interface TrustedDeviceInfo {
+  id: string;
+  device: string;
+  createdAt: string;
+  lastActive: string;
+}
+
+type PersonalInfoState = {
+  firstName: string;
+  lastName: string;
+  companyName: string;
+  city: string;
+  province: string;
+  barangay: string;
+  addressType: string;
+  address: string;
+  phone: string;
+  email: string;
+  about: string;
+  jobPosition: string;
+  linkedin: string;
+  website: string;
+  photo: File | null;
+};
+
+const profileToPersonalInfo = (profile: any, previous?: PersonalInfoState): PersonalInfoState => ({
+  firstName: profile?.firstName || "",
+  lastName: profile?.lastName || "",
+  companyName: profile?.companyName || "",
+  email: profile?.email || previous?.email || "",
+  phone: profile?.phoneNumber || "",
+  city: profile?.city || "",
+  province: profile?.province || "",
+  barangay: profile?.barangay || "",
+  addressType: profile?.addressType || "home",
+  address: profile?.address || "",
+  about: profile?.about || "",
+  jobPosition: profile?.jobPosition || "",
+  linkedin: profile?.linkedin || "",
+  website: profile?.website || "",
+  photo: previous?.photo || null,
+});
+
+export function Settings() {
+  const { t: tAuth } = useTranslation("auth");
+  const { t: tCommon } = useTranslation("common");
+  const { t: tAdmin } = useTranslation("admin");
+  // Settings is shared by all three roles, but its `settings.*` strings have
+  // always lived in the worker namespace.
+  const { t: tWorker } = useTranslation("worker");
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = mapTabParam(searchParams.get("tab")) ?? "account";
+  const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+  const initialAccountTab = mapAccountTab(searchParams.get("tab")) ?? "personal";
+  const [accountTab, setAccountTab] = useState<AccountTab>(initialAccountTab);
+  const initialPrivacyTab = mapPrivacyTab(searchParams.get("tab")) ?? "security";
+  const [privacyTab, setPrivacyTab] = useState<PrivacyTab>(initialPrivacyTab);
+
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [hideHiredCandidates, setHideHiredCandidates] = useState(true);
+  const { user, updateProfile: updateAuthProfile } = useAuth();
+  const roleValue = String((user as any)?.role || "").toLowerCase();
+  const accountTypeValue = String((user as any)?.accountType || "").toLowerCase();
+  const isAdminRole = roleValue === "admin" || roleValue === "superadmin";
+  const isEmployerRole =
+    accountTypeValue === "employer" || roleValue === "hire" || roleValue === "employer";
+  const hasEmployerAccess = isEmployerRole || roleValue === "both";
+  const [isProfileSaving, setIsProfileSaving] = useState(false);
+  const [isAvatarSubmitting, setIsAvatarSubmitting] = useState(false);
+  const [isProfileLoading, setIsProfileLoading] = useState(true);
+  const [profileFormError, setProfileFormError] = useState("");
+  const [profileErrorField, setProfileErrorField] = useState<ProfileValidationField | null>(null);
+  const profileDraftDirtyRef = useRef(false);
+  const originalPersonalInfoRef = useRef<PersonalInfoState | null>(null);
+  const originalTotalExperienceRef = useRef("");
+
+  const [personalInfo, setPersonalInfo] = useState<PersonalInfoState>({
+    firstName: "",
+    lastName: "",
+    companyName: "",
+    city: "",
+    province: "",
+    barangay: "",
+    addressType: "home",
+    address: "",
+    phone: "",
+    email: "",
+    about: "",
+    jobPosition: "",
+    linkedin: "",
+    website: "",
+    photo: null as File | null,
+  });
+
+  const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [workExperiences, setWorkExperiences] = useState<WorkExperienceItem[]>([]);
+  const [experienceDraft, setExperienceDraft] = useState(emptyExperienceDraft);
+  const [editingExperienceId, setEditingExperienceId] = useState<string | null>(null);
+  const [isExperienceSaving, setIsExperienceSaving] = useState(false);
+  const [deleteExperienceTarget, setDeleteExperienceTarget] = useState<WorkExperienceItem | null>(null);
+  const [deletingExperienceId, setDeletingExperienceId] = useState<string | null>(null);
+  // Scoped by experience id, not a single flag, since multiple work-history
+  // entries exist and each has its own independent "Add photo" control.
+  const [mediaUploadingId, setMediaUploadingId] = useState<string | null>(null);
+  const [mediaDeletingId, setMediaDeletingId] = useState<string | null>(null);
+
+  const [internships, setInternships] = useState<InternshipItem[]>([]);
+  const [internshipDraft, setInternshipDraft] = useState(emptyInternshipDraft);
+  const [editingInternshipId, setEditingInternshipId] = useState<string | null>(null);
+  const [isInternshipSaving, setIsInternshipSaving] = useState(false);
+  const [deleteInternshipTarget, setDeleteInternshipTarget] = useState<InternshipItem | null>(null);
+  const [deletingInternshipId, setDeletingInternshipId] = useState<string | null>(null);
+
+  const [certificates, setCertificates] = useState<CertificateItem[]>([]);
+  const [certificateDraft, setCertificateDraft] = useState(emptyCertificateDraft);
+  const [editingCertificateId, setEditingCertificateId] = useState<string | null>(null);
+  const [isCertificateSaving, setIsCertificateSaving] = useState(false);
+  const [deleteCertificateTarget, setDeleteCertificateTarget] = useState<CertificateItem | null>(null);
+  const [deletingCertificateId, setDeletingCertificateId] = useState<string | null>(null);
+
+  const [experienceStats, setExperienceStats] = useState({
+    totalExperience: "",
+  });
+
+  const [newSkillName, setNewSkillName] = useState("");
+  const [newSkillDescription, setNewSkillDescription] = useState("");
+  const [skillSelectionMode, setSkillSelectionMode] = useState<"predefined" | "custom">("predefined");
+  const [selectedPredefinedSkill, setSelectedPredefinedSkill] = useState("");
+  const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
+  const [editingSkillDescription, setEditingSkillDescription] = useState("");
+  const [skillMutationId, setSkillMutationId] = useState<string | null>(null);
+
+  const [securityData, setSecurityData] = useState({
+    currentPassword: "",
+    newPassword: "",
+    confirmPassword: "",
+  });
+  const [passwordOtp, setPasswordOtp] = useState("");
+  const [passwordOtpRequested, setPasswordOtpRequested] = useState(false);
+  const [isOtpSending, setIsOtpSending] = useState(false);
+  const [isPasswordSubmitting, setIsPasswordSubmitting] = useState(false);
+  const [secondaryEmail, setSecondaryEmail] = useState<StaffSecondaryEmailStatus | null>(null);
+  const [secondaryEmailError, setSecondaryEmailError] = useState("");
+  const [secondaryEmailReload, setSecondaryEmailReload] = useState(0);
+
+  useEffect(() => {
+    if (!isAdminRole) return;
+    let active = true;
+    setSecondaryEmail(null);
+    setSecondaryEmailError("");
+    getStaffSecondaryEmail().then((status) => {
+      if (active) setSecondaryEmail(status);
+    }).catch((error: Error) => {
+      if (active) setSecondaryEmailError(error.message);
+    });
+    return () => { active = false; };
+  }, [isAdminRole, user?.id, secondaryEmailReload]);
+
+  const [resumeUrl, setResumeUrl] = useState<string | null>(null);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [avatarFileToEdit, setAvatarFileToEdit] = useState<File | null>(null);
+  const resolvedAvatarUrl = toAbsoluteAssetUrl(avatarUrl);
+
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+
+  const [trustedDevices, setTrustedDevices] = useState<TrustedDeviceInfo[]>([]);
+  const [isLoadingTrustedDevices, setIsLoadingTrustedDevices] = useState(false);
+
+  const [verificationStepsData, setVerificationStepsData] = useState<VerificationStep[]>([]);
+  const [verificationCompletionPercent, setVerificationCompletionPercent] = useState(0);
+  const [isLoadingVerification, setIsLoadingVerification] = useState(false);
+  const [phoneVerificationCode, setPhoneVerificationCode] = useState("");
+  const [phoneCodeRequested, setPhoneCodeRequested] = useState(false);
+  const [isSendingPhoneCode, setIsSendingPhoneCode] = useState(false);
+  const [isConfirmingPhoneCode, setIsConfirmingPhoneCode] = useState(false);
+  const [phoneCodeHint, setPhoneCodeHint] = useState<string | null>(null);
+  const [isIdWizardOpen, setIsIdWizardOpen] = useState(false);
+  const [isUploadingAddressDocument, setIsUploadingAddressDocument] = useState(false);
+  const addressDocumentInputRef = useRef<HTMLInputElement>(null);
+
+  const [provinceOptions, setProvinceOptions] = useState<ProvinceOption[]>([]);
+  const [cityOptions, setCityOptions] = useState<CityOption[]>([]);
+  const [barangayOptions, setBarangayOptions] = useState<BarangayOption[]>([]);
+  const [isLoadingLocationData, setIsLoadingLocationData] = useState(false);
+  const [isLoadingBarangays, setIsLoadingBarangays] = useState(false);
+  const [locationDataError, setLocationDataError] = useState("");
+  const [barangayDataError, setBarangayDataError] = useState("");
+  const [locationReloadKey, setLocationReloadKey] = useState(0);
+
+  const completedSteps = verificationStepsData.filter((step) => step.status === "complete").length;
+  const isProfileVerified = verificationStepsData.length > 0 && completedSteps === verificationStepsData.length;
+  const phoneVerificationStatus = verificationStepsData.find((step) => step.id === "phone")?.status;
+  const savedPhone = normalizePhone(originalPersonalInfoRef.current?.phone || "");
+  const currentPhone = normalizePhone(personalInfo.phone);
+  const phoneHasUnsavedChanges = currentPhone !== savedPhone;
+  const isCurrentPhoneVerified = phoneVerificationStatus === "complete" && !phoneHasUnsavedChanges;
+
+  const selectedProvince = provinceOptions.find(
+    (item) => item.name.toLowerCase() === personalInfo.province.trim().toLowerCase(),
+  );
+
+  const filteredCityOptions = selectedProvince?.code
+    ? cityOptions.filter((item) => item.provinceCode === selectedProvince.code)
+    : [];
+
+  const selectedCity = filteredCityOptions.find(
+    (item) => item.name.toLowerCase() === personalInfo.city.trim().toLowerCase(),
+  );
+
+  const selectedBarangay = barangayOptions.find(
+    (item) => item.name.toLowerCase() === personalInfo.barangay.trim().toLowerCase(),
+  );
+
+  const visibleMainTabs = mainTabConfig
+    .filter((id) => hasEmployerAccess || id !== "payments")
+    .map((id) => ({ id, label: tWorker(`settings.tabs.${id}`) }));
+
+  const visibleAccountTabs = (isAdminRole || isEmployerRole
+    ? accountTabConfig.filter((id) => id === "personal")
+    : accountTabConfig
+  ).map((id) => ({
+    id,
+    label: tWorker(`settings.accountTabs.${isEmployerRole && id === "personal" ? "business" : id}`),
+  }));
+
+  // Admins have no identity verification to complete, so that pane goes away
+  // for them exactly as the old top-level tab used to.
+  const visiblePrivacyTabs = privacyTabConfig
+    .filter((id) => id !== "verification" || !isAdminRole)
+    .map((id) => ({ id, label: tWorker(`settings.privacyTabs.${id}`) }));
+
+  useEffect(() => {
+    if (!visibleMainTabs.some((tab) => tab.id === activeTab)) {
+      setActiveTab("account");
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set("tab", "account");
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [activeTab, searchParams, setSearchParams, visibleMainTabs]);
+
+  useEffect(() => {
+    const tabParam = searchParams.get("tab");
+    const mappedTab = mapTabParam(tabParam);
+    if (!mappedTab) {
+      if (tabParam) {
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set("tab", "account");
+        setSearchParams(nextParams, { replace: true });
+      }
+      return;
+    }
+    if (mappedTab !== activeTab) {
+      setActiveTab(mappedTab);
+    }
+  }, [activeTab, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (activeTab !== "account") return;
+    const tabParam = searchParams.get("tab");
+    const mappedAccountTab = mapAccountTab(tabParam);
+    const isVisible = (tab: AccountTab) => visibleAccountTabs.some((item) => item.id === tab);
+
+    if (mappedAccountTab) {
+      if (!isVisible(mappedAccountTab)) {
+        setAccountTab("personal");
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set("tab", "personal");
+        setSearchParams(nextParams, { replace: true });
+        return;
+      }
+      if (mappedAccountTab !== accountTab) {
+        setAccountTab(mappedAccountTab);
+      }
+      return;
+    }
+    if ((tabParam === "account" || !isVisible(accountTab)) && accountTab !== "personal") {
+      setAccountTab("personal");
+    }
+  }, [activeTab, accountTab, searchParams, visibleAccountTabs, setSearchParams]);
+
+  useEffect(() => {
+    if (activeTab !== "privacy") return;
+    const tabParam = searchParams.get("tab");
+    const mappedPrivacyTab = mapPrivacyTab(tabParam);
+    const isVisible = (tab: PrivacyTab) => visiblePrivacyTabs.some((item) => item.id === tab);
+
+    if (mappedPrivacyTab) {
+      if (!isVisible(mappedPrivacyTab)) {
+        setPrivacyTab("security");
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set("tab", "security");
+        setSearchParams(nextParams, { replace: true });
+        return;
+      }
+      if (mappedPrivacyTab !== privacyTab) {
+        setPrivacyTab(mappedPrivacyTab);
+      }
+      return;
+    }
+    if (!isVisible(privacyTab) && privacyTab !== "security") {
+      setPrivacyTab("security");
+    }
+  }, [activeTab, privacyTab, searchParams, visiblePrivacyTabs, setSearchParams]);
+
+  const handleAccountTabChange = (tab: AccountTab) => {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", tab);
+    setSearchParams(nextParams, { replace: true });
+  };
+
+  const handlePrivacyTabChange = (tab: PrivacyTab) => {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", tab);
+    setSearchParams(nextParams, { replace: true });
+  };
+
+  const handleMainTabChange = (tab: TabType) => {
+    const nextParams = new URLSearchParams(searchParams);
+    if (tab === "account") {
+      nextParams.set("tab", accountTab);
+    } else if (tab === "privacy") {
+      nextParams.set("tab", privacyTab);
+    } else {
+      nextParams.set("tab", tab);
+    }
+    setSearchParams(nextParams, { replace: true });
+  };
+
+  const reloadVerificationStatus = async () => {
+    const response = await getVerificationStatus();
+    const steps = response?.steps || [];
+    setVerificationStepsData(steps);
+    setVerificationCompletionPercent(response?.completionPercent || 0);
+
+    const phoneStep = steps.find((step: VerificationStep) => step.id === "phone");
+    if (phoneStep?.status === "complete") {
+      setPhoneCodeRequested(false);
+      setPhoneVerificationCode("");
+      setPhoneCodeHint(null);
+    }
+  };
+
+  // Load sessions when the Security pane is showing.
+  useEffect(() => {
+    if (activeTab !== "privacy" || privacyTab !== "security") return;
+    const loadSessions = async () => {
+      setIsLoadingSessions(true);
+      try {
+        // Clean up inactive sessions first
+        try {
+          await cleanupInactiveSessions();
+        } catch (cleanupErr) {
+          console.warn("Cleanup sessions warning:", cleanupErr);
+          // Continue even if cleanup fails
+        }
+        
+        const response = await getSessions();
+        const sessionsData = response?.sessions || [];
+
+        const mapped = sessionsData.map((s: any) => ({
+          id: s._id,
+          current: s.isCurrent === true,
+          device: s.userAgent || "Unknown device",
+          location: "Unknown",
+          ip: s.ip || "Unknown",
+          lastActive: s.createdAt ? new Date(s.createdAt).toLocaleString() : "Unknown",
+        }));
+        setSessions(mapped);
+      } catch (error: any) {
+        console.error("Failed to load sessions:", error);
+        toast.error("Failed to load active sessions");
+      } finally {
+        setIsLoadingSessions(false);
+      }
+    };
+    loadSessions();
+  }, [activeTab, privacyTab]);
+
+  // Load trusted devices when the Security pane is showing.
+  useEffect(() => {
+    if (activeTab !== "privacy" || privacyTab !== "security") return;
+    const loadTrustedDevices = async () => {
+      setIsLoadingTrustedDevices(true);
+      try {
+        const response = await getTrustedDevices();
+        const devicesData = response?.devices || [];
+        const mapped = devicesData.map((d: any) => ({
+          id: d._id,
+          device: d.label || "Unknown device",
+          createdAt: d.createdAt ? new Date(d.createdAt).toLocaleString() : "Unknown",
+          lastActive: d.lastUsedAt ? new Date(d.lastUsedAt).toLocaleString() : "Unknown",
+        }));
+        setTrustedDevices(mapped);
+      } catch (error: any) {
+        console.error("Failed to load trusted devices:", error);
+      } finally {
+        setIsLoadingTrustedDevices(false);
+      }
+    };
+    loadTrustedDevices();
+  }, [activeTab, privacyTab]);
+
+  // Load verification status when its own pane inside Security & Privacy is
+  // showing.
+  useEffect(() => {
+    if (activeTab !== "privacy" || privacyTab !== "verification" || isAdminRole) return;
+    const loadVerification = async () => {
+      setIsLoadingVerification(true);
+      try {
+        await reloadVerificationStatus();
+      } catch (error: any) {
+        console.error("Failed to load verification status:", error);
+        toast.error("Failed to load verification status");
+      } finally {
+        setIsLoadingVerification(false);
+      }
+    };
+    loadVerification();
+  }, [activeTab, privacyTab, isAdminRole]);
+
+  const handlePersonalInfoChange = (field: string, value: string) => {
+    profileDraftDirtyRef.current = true;
+    if (profileFormError) {
+      setProfileFormError("");
+      setProfileErrorField(null);
+    }
+    if (field === "province") {
+      setPersonalInfo((prev) => ({
+        ...prev,
+        province: value,
+        city: "",
+        barangay: "",
+      }));
+      return;
+    }
+
+    if (field === "city") {
+      setPersonalInfo((prev) => ({
+        ...prev,
+        city: value,
+        barangay: "",
+      }));
+      return;
+    }
+
+    setPersonalInfo((prev) => ({
+      ...prev,
+      [field]: value,
+    }));
+  };
+
+  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validationError = validateAvatarFile(file);
+    if (validationError) {
+      toast.error(validationError);
+      e.target.value = "";
+      return;
+    }
+
+    // Do not upload the original. The editor creates the square, rotated image
+    // that is shown in its preview and hands that finished file to save below.
+    setAvatarFileToEdit(file);
+    e.target.value = "";
+  };
+
+  const handleEditedPhotoSave = async (file: File) => {
+    setIsAvatarSubmitting(true);
+    try {
+      const response = await uploadAvatar(file);
+      const newAvatarUrl = toAbsoluteAssetUrl(response?.data?.avatarUrl || null);
+      setAvatarUrl(newAvatarUrl);
+      updateAuthProfile({ avatarUrl: newAvatarUrl ?? undefined });
+      toast.success("Profile photo uploaded successfully!");
+      // Trigger sidebar update
+      window.dispatchEvent(new Event('auth_user_updated'));
+      setAvatarFileToEdit(null);
+    } catch (error: any) {
+      toast.error(error.message || "Failed to upload profile photo");
+    } finally {
+      setIsAvatarSubmitting(false);
+    }
+  };
+
+  const handleDeletePhoto = async () => {
+    if (isAvatarSubmitting) return;
+    setIsAvatarSubmitting(true);
+    try {
+      await deleteAvatar();
+      setAvatarUrl(null);
+      updateAuthProfile({ avatarUrl: undefined });
+      toast.success("Profile photo removed successfully!");
+      // Trigger sidebar update
+      window.dispatchEvent(new Event('auth_user_updated'));
+    } catch (error: any) {
+      toast.error(error.message || "Failed to remove profile photo");
+    } finally {
+      setIsAvatarSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!user || profileDraftDirtyRef.current) return;
+    setPersonalInfo((prev) => profileToPersonalInfo(user, prev));
+    setExperienceStats({
+      totalExperience: user.totalExperience || "",
+    });
+    if (user.skills && Array.isArray(user.skills)) {
+      const mappedSkills = user.skills.map((skill: any) => ({
+        ...skill,
+        id: skill.id || skill._id || '',
+      })) as SkillItem[];
+      setSkills(mappedSkills);
+    }
+    if (Array.isArray(user.workExperience)) {
+      setWorkExperiences(mapWorkExperiences(user.workExperience));
+    }
+    if (Array.isArray(user.internships)) {
+      setInternships(mapInternships(user.internships));
+    }
+    if (Array.isArray(user.certificates)) {
+      setCertificates(mapCertificates(user.certificates));
+    }
+  }, [user]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadLocationData = async () => {
+      setIsLoadingLocationData(true);
+      setLocationDataError("");
+      try {
+        const { provinces, cities } = await getPhilippineLocationOptions();
+        if (!isMounted) return;
+        setProvinceOptions(provinces);
+        setCityOptions(cities);
+      } catch (error) {
+        console.error("Failed to load Philippine location data:", error);
+        if (isMounted) {
+          setLocationDataError("Philippine location options are unavailable. Retry before changing your location.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingLocationData(false);
+        }
+      }
+    };
+
+    loadLocationData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [locationReloadKey]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadBarangays = async () => {
+      if (!selectedCity?.code) {
+        setBarangayOptions([]);
+        setBarangayDataError("");
+        return;
+      }
+
+      setIsLoadingBarangays(true);
+      setBarangayDataError("");
+      try {
+        const normalized = await getPhilippineBarangays(selectedCity.code);
+        if (!isMounted) return;
+        setBarangayOptions(normalized);
+      } catch (error) {
+        console.error("Failed to load barangays:", error);
+        if (isMounted) {
+          setBarangayOptions([]);
+          setBarangayDataError("Barangay options are unavailable. Re-select the city or try again shortly.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingBarangays(false);
+        }
+      }
+    };
+
+    loadBarangays();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedCity?.code]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadProfile = async () => {
+      setIsProfileLoading(true);
+      try {
+        const response = await getProfile();
+        const profile = (response as any)?.user ?? response;
+        if (!isMounted || !profile) return;
+        if (!profileDraftDirtyRef.current) {
+          const loadedPersonalInfo = profileToPersonalInfo(profile);
+          setPersonalInfo(loadedPersonalInfo);
+          originalPersonalInfoRef.current = loadedPersonalInfo;
+          originalTotalExperienceRef.current = profile.totalExperience || "";
+        }
+        if (profile.skills && Array.isArray(profile.skills)) {
+          const mappedSkills = profile.skills.map((skill: any) => ({
+            ...skill,
+            id: skill.id || skill._id || '',
+          })) as SkillItem[];
+          setSkills(mappedSkills);
+        }
+        setWorkExperiences(mapWorkExperiences(profile.workExperience || []));
+        setInternships(mapInternships(profile.internships || []));
+        setCertificates(mapCertificates(profile.certificates || []));
+        setExperienceStats({
+          totalExperience: profile.totalExperience || "",
+        });
+        setResumeUrl(profile.resumeUrl || null);
+        setAvatarUrl(toAbsoluteAssetUrl(profile.avatarUrl));
+        if (typeof profile.hideHiredCandidates === "boolean") {
+          setHideHiredCandidates(profile.hideHiredCandidates);
+        }
+        const normalizedAvatarUrl: string | undefined = toAbsoluteAssetUrl(profile.avatarUrl) || undefined;
+        updateAuthProfile({
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          email: profile.email,
+          phoneNumber: profile.phoneNumber,
+          city: profile.city,
+          province: profile.province,
+          barangay: profile.barangay,
+          addressType: profile.addressType,
+          address: profile.address,
+          companyName: profile.companyName,
+          about: profile.about,
+          jobPosition: profile.jobPosition,
+          linkedin: profile.linkedin,
+          website: profile.website,
+          totalExperience: profile.totalExperience,
+          projectsCompleted: profile.projectsCompleted,
+          jobsApplied: profile.jobsApplied,
+          successRate: profile.successRate,
+          avatarUrl: normalizedAvatarUrl,
+        });
+      } catch (error: any) {
+        const message = error?.message || "Failed to load profile.";
+        toast.error(message);
+      } finally {
+        if (isMounted) setIsProfileLoading(false);
+      }
+    };
+    loadProfile();
+    return () => {
+      isMounted = false;
+    };
+  }, [updateAuthProfile]);
+
+  const handleSavePersonalInfo = async () => {
+    if (isProfileSaving || isProfileLoading) return;
+    const firstName = normalizeFullName(personalInfo.firstName);
+    const lastName = normalizeFullName(personalInfo.lastName);
+    const phoneNumber = normalizePhone(personalInfo.phone);
+    const normalizedProfile = {
+      firstName,
+      lastName,
+      phone: personalInfo.phone.trim() ? phoneNumber : "",
+      companyName: personalInfo.companyName.trim(),
+      jobPosition: personalInfo.jobPosition.trim(),
+      about: personalInfo.about.trim(),
+      address: personalInfo.address.trim(),
+      linkedin: personalInfo.linkedin.trim(),
+      website: personalInfo.website.trim(),
+    };
+    const validationIssue = validateProfileDetails(normalizedProfile, { employer: isEmployerRole }, tAuth);
+    if (validationIssue) {
+      const fieldIds: Record<ProfileValidationField, string> = {
+        firstName: "settings-first-name",
+        lastName: "settings-last-name",
+        phone: "settings-phone",
+        companyName: "settings-company-name",
+        jobPosition: "settings-job-position",
+        about: "settings-about",
+        address: "settings-address",
+        linkedin: "settings-linkedin",
+        website: "settings-website",
+      };
+      setProfileFormError(validationIssue.message);
+      setProfileErrorField(validationIssue.field);
+      requestAnimationFrame(() => document.getElementById(fieldIds[validationIssue.field])?.focus());
+      return;
+    }
+
+    const original = originalPersonalInfoRef.current;
+    if (!original) {
+      const message = "Your profile is still loading. Please wait and try again.";
+      setProfileFormError(message);
+      toast.error(message);
+      return;
+    }
+    const phoneChanged = phoneNumber !== normalizePhone(original.phone);
+
+    const normalizedLocation = {
+      province: personalInfo.province.trim(),
+      city: personalInfo.city.trim(),
+      barangay: personalInfo.barangay.trim(),
+    };
+    const locationChanged = (Object.keys(normalizedLocation) as Array<keyof typeof normalizedLocation>)
+      .some((field) => normalizedLocation[field] !== original[field].trim());
+    const hasAnyLocation = Object.values(normalizedLocation).some(Boolean);
+    if (locationChanged && (isLoadingLocationData || isLoadingBarangays)) {
+      const message = "Please wait for the Philippine location options to finish loading.";
+      setProfileFormError(message);
+      toast.error(message);
+      return;
+    }
+    if (locationChanged && locationDataError) {
+      const message = "Location options are unavailable, so location changes cannot be validated yet. Retry loading them first.";
+      setProfileFormError(message);
+      toast.error(message);
+      return;
+    }
+    if (hasAnyLocation && (!selectedProvince || !selectedCity || !selectedBarangay)) {
+      const message = "Select a valid Province, City/Municipality, and Barangay from the suggestions.";
+      setProfileFormError(message);
+      toast.error(message);
+      return;
+    }
+
+    setProfileFormError("");
+    setProfileErrorField(null);
+    setIsProfileSaving(true);
+    try {
+      const nextValues: Record<string, string> = {
+        firstName,
+        lastName,
+        companyName: personalInfo.companyName.trim(),
+        city: normalizedLocation.city,
+        province: normalizedLocation.province,
+        barangay: normalizedLocation.barangay,
+        addressType: personalInfo.addressType,
+        address: personalInfo.address.trim(),
+        phoneNumber,
+        about: personalInfo.about.trim(),
+        totalExperience: experienceStats.totalExperience,
+        jobPosition: personalInfo.jobPosition.trim(),
+        linkedin: personalInfo.linkedin.trim(),
+        website: personalInfo.website.trim(),
+      };
+      const originalValues: Record<string, string> = {
+        firstName: original.firstName.trim(),
+        lastName: original.lastName.trim(),
+        companyName: original.companyName.trim(),
+        city: original.city.trim(),
+        province: original.province.trim(),
+        barangay: original.barangay.trim(),
+        addressType: original.addressType,
+        address: original.address.trim(),
+        phoneNumber: normalizePhone(original.phone),
+        about: original.about.trim(),
+        totalExperience: originalTotalExperienceRef.current,
+        jobPosition: original.jobPosition.trim(),
+        linkedin: original.linkedin.trim(),
+        website: original.website.trim(),
+      };
+      const adminAllowed = new Set([
+        "firstName", "lastName", "companyName", "city", "province", "barangay", "addressType", "address",
+      ]);
+      const profilePayload = Object.fromEntries(
+        Object.entries(nextValues).filter(([key, value]) => {
+          if (isAdminRole && !adminAllowed.has(key)) return false;
+          return value !== originalValues[key];
+        }),
+      );
+      if (Object.keys(profilePayload).length === 0) {
+        profileDraftDirtyRef.current = false;
+        toast.success("No profile changes to save.");
+        return;
+      }
+      const response = await updateProfile({
+        ...profilePayload,
+        // Note: projectsCompleted, jobsApplied, and successRate are auto-calculated by backend
+      });
+      const updated = (response as any)?.user ?? response;
+      const savedPersonalInfo = profileToPersonalInfo(updated, personalInfo);
+      setPersonalInfo(savedPersonalInfo);
+      originalPersonalInfoRef.current = savedPersonalInfo;
+      originalTotalExperienceRef.current = updated.totalExperience || "";
+      
+      setExperienceStats({
+        totalExperience: updated.totalExperience ?? "",
+      });
+      
+      profileDraftDirtyRef.current = false;
+      updateAuthProfile({
+        firstName: updated.firstName,
+        lastName: updated.lastName,
+        email: updated.email,
+        phoneNumber: updated.phoneNumber,
+        city: updated.city,
+        province: updated.province,
+        barangay: updated.barangay,
+        addressType: updated.addressType,
+        address: updated.address,
+        companyName: updated.companyName,
+        about: updated.about,
+        jobPosition: updated.jobPosition,
+        linkedin: updated.linkedin,
+        website: updated.website,
+        totalExperience: updated.totalExperience,
+        projectsCompleted: updated.projectsCompleted ?? 0,
+        jobsApplied: updated.jobsApplied ?? 0,
+        successRate: updated.successRate ?? '0%',
+        avatarUrl: updated.avatarUrl,
+      });
+      if (phoneChanged) {
+        setPhoneCodeRequested(false);
+        setPhoneVerificationCode("");
+        setPhoneCodeHint(null);
+        setVerificationStepsData((steps) =>
+          steps.map((step) => step.id === "phone" ? { ...step, status: "in-review" } : step),
+        );
+      }
+      toast.success("Personal information saved successfully!");
+    } catch (error: any) {
+      const message = error?.message || "Failed to save personal information.";
+      setProfileFormError(message);
+      setProfileErrorField(null);
+      toast.error(message);
+    } finally {
+      setIsProfileSaving(false);
+    }
+  };
+
+  const handleAddSkill = async () => {
+    const skillName = skillSelectionMode === "predefined" ? selectedPredefinedSkill : newSkillName.trim();
+    const skillDescription = newSkillDescription.trim();
+    
+    if (!skillName) {
+      toast.error("Please select or enter a skill name");
+      return;
+    }
+    if (skillName.length > PROFILE_LIMITS.skillName) {
+      toast.error(`Skill name must be ${PROFILE_LIMITS.skillName} characters or fewer.`);
+      return;
+    }
+    if (skillDescription.length > PROFILE_LIMITS.skillDescription) {
+      toast.error(`Skill description must be ${PROFILE_LIMITS.skillDescription} characters or fewer.`);
+      return;
+    }
+    if (skills.length >= 50 && !skills.some((skill) => skill.name.toLowerCase() === skillName.toLowerCase())) {
+      toast.error("You can add up to 50 skills.");
+      return;
+    }
+    if (skillMutationId) return;
+    setSkillMutationId("new");
+    try {
+      const data = await addProfileSkill({ name: skillName, description: skillDescription });
+      const mappedSkills = (data.data?.skills || []).map((skill: any) => ({
+        ...skill,
+        id: skill.id || skill._id || "",
+      })) as SkillItem[];
+      setSkills(mappedSkills);
+      updateAuthProfile({ skills: mappedSkills });
+      setNewSkillName("");
+      setNewSkillDescription("");
+      setSelectedPredefinedSkill("");
+      setSkillSelectionMode("predefined");
+      toast.success(data?.message || `${skillName} saved to your skills!`);
+    } catch (error: any) {
+      toast.error(error.message || "Failed to add skill");
+    } finally {
+      setSkillMutationId(null);
+    }
+  };
+
+  const handleEditSkillDescription = async (id: string) => {
+    if (editingSkillDescription.trim().length > PROFILE_LIMITS.skillDescription) {
+      toast.error(`Skill description must be ${PROFILE_LIMITS.skillDescription} characters or fewer.`);
+      return;
+    }
+    if (skillMutationId) return;
+    setSkillMutationId(id);
+    try {
+      const data = await updateProfileSkill(id, { description: editingSkillDescription });
+      const mappedSkills = (data.data?.skills || []).map((skill: any) => ({
+        ...skill,
+        id: skill.id || skill._id || "",
+      })) as SkillItem[];
+      setSkills(mappedSkills);
+      updateAuthProfile({ skills: mappedSkills });
+      setEditingSkillId(null);
+      setEditingSkillDescription("");
+      toast.success("Skill description updated successfully!");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to update skill description");
+    } finally {
+      setSkillMutationId(null);
+    }
+  };
+
+  const handleDeleteSkill = async (id: string) => {
+    if (skillMutationId) return;
+    setSkillMutationId(id);
+    try {
+      const data = await deleteProfileSkill(id);
+      const mappedSkills = (data.data?.skills || []).map((skill: any) => ({
+        ...skill,
+        id: skill.id || skill._id || "",
+      })) as SkillItem[];
+      setSkills(mappedSkills);
+      updateAuthProfile({ skills: mappedSkills });
+      toast.success("Skill removed successfully!");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to remove skill");
+    } finally {
+      setSkillMutationId(null);
+    }
+  };
+
+  const resetExperienceEditor = () => {
+    setExperienceDraft(emptyExperienceDraft);
+    setEditingExperienceId(null);
+  };
+
+  const handleSaveExperience = async () => {
+    if (isExperienceSaving) return;
+    if (!experienceDraft.title.trim() || !experienceDraft.company.trim() || !experienceDraft.startDate) {
+      toast.error("Job title, company or client, and start date are required.");
+      return;
+    }
+    if (!experienceDraft.current && !experienceDraft.endDate) {
+      toast.error("Add an end date or mark this as your current role.");
+      return;
+    }
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    if (experienceDraft.startDate > currentMonth || (!experienceDraft.current && String(experienceDraft.endDate) > currentMonth)) {
+      toast.error("Work experience dates cannot be in the future.");
+      return;
+    }
+    if (!experienceDraft.current && experienceDraft.endDate && experienceDraft.endDate < experienceDraft.startDate) {
+      toast.error("End date cannot be before start date.");
+      return;
+    }
+    if (
+      experienceDraft.title.trim().length > PROFILE_LIMITS.experienceTitle ||
+      experienceDraft.company.trim().length > PROFILE_LIMITS.experienceCompany ||
+      (experienceDraft.location?.trim().length || 0) > PROFILE_LIMITS.experienceLocation ||
+      (experienceDraft.description?.trim().length || 0) > PROFILE_LIMITS.experienceDescription
+    ) {
+      toast.error("One or more work experience fields exceed the allowed length.");
+      return;
+    }
+    if (!editingExperienceId && workExperiences.length >= 25) {
+      toast.error("You can add up to 25 work experience entries.");
+      return;
+    }
+
+    setIsExperienceSaving(true);
+    try {
+      const payload = {
+        ...experienceDraft,
+        title: experienceDraft.title.trim(),
+        company: experienceDraft.company.trim(),
+        location: experienceDraft.location?.trim() || "",
+        description: experienceDraft.description?.trim() || "",
+        endDate: experienceDraft.current ? null : experienceDraft.endDate,
+      };
+      const response = editingExperienceId
+        ? await updateWorkExperience(editingExperienceId, payload)
+        : await addWorkExperience(payload);
+      const nextItems = mapWorkExperiences((response as any)?.workExperience || []);
+      setWorkExperiences(nextItems);
+      updateAuthProfile({ workExperience: nextItems });
+      resetExperienceEditor();
+      toast.success(editingExperienceId ? "Work experience updated." : "Work experience added.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to save work experience.");
+    } finally {
+      setIsExperienceSaving(false);
+    }
+  };
+
+  const handleEditExperience = (item: WorkExperienceItem) => {
+    setEditingExperienceId(item.id);
+    setExperienceDraft({
+      title: item.title,
+      company: item.company,
+      location: item.location || "",
+      startDate: toMonthInput(item.startDate),
+      endDate: toMonthInput(item.endDate),
+      current: Boolean(item.current),
+      description: item.description || "",
+    });
+  };
+
+  const handleDeleteExperience = async (id: string) => {
+    if (deletingExperienceId) return;
+    setDeletingExperienceId(id);
+    try {
+      const response = await deleteWorkExperience(id);
+      const nextItems = mapWorkExperiences((response as any)?.workExperience || []);
+      setWorkExperiences(nextItems);
+      updateAuthProfile({ workExperience: nextItems });
+      if (editingExperienceId === id) resetExperienceEditor();
+      setDeleteExperienceTarget(null);
+      toast.success("Work experience removed.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to remove work experience.");
+    } finally {
+      setDeletingExperienceId(null);
+    }
+  };
+
+  const handleUploadExperienceMedia = async (experienceId: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validationError = validateExperienceMediaFile(file);
+    if (validationError) {
+      toast.error(validationError);
+      e.target.value = "";
+      return;
+    }
+    const target = workExperiences.find((item) => item.id === experienceId);
+    if ((target?.media?.length || 0) >= PROFILE_LIMITS.experienceMediaPerEntry) {
+      toast.error(`You can attach up to ${PROFILE_LIMITS.experienceMediaPerEntry} photos to one work experience.`);
+      e.target.value = "";
+      return;
+    }
+
+    setMediaUploadingId(experienceId);
+    try {
+      const response = await uploadExperienceMedia(experienceId, file);
+      const nextItems = mapWorkExperiences((response as any)?.workExperience || []);
+      setWorkExperiences(nextItems);
+      updateAuthProfile({ workExperience: nextItems });
+      toast.success("Photo attached.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to attach photo.");
+    } finally {
+      setMediaUploadingId(null);
+      e.target.value = "";
+    }
+  };
+
+  const handleDeleteExperienceMedia = async (experienceId: string, mediaId: string) => {
+    if (mediaDeletingId) return;
+    setMediaDeletingId(mediaId);
+    try {
+      const response = await deleteExperienceMedia(experienceId, mediaId);
+      const nextItems = mapWorkExperiences((response as any)?.workExperience || []);
+      setWorkExperiences(nextItems);
+      updateAuthProfile({ workExperience: nextItems });
+      toast.success("Photo removed.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to remove photo.");
+    } finally {
+      setMediaDeletingId(null);
+    }
+  };
+
+  const resetInternshipEditor = () => {
+    setInternshipDraft(emptyInternshipDraft);
+    setEditingInternshipId(null);
+  };
+
+  const handleSaveInternship = async () => {
+    if (isInternshipSaving) return;
+    if (!internshipDraft.title.trim() || !internshipDraft.company.trim() || !internshipDraft.startDate) {
+      toast.error("Internship title, company, and start date are required.");
+      return;
+    }
+    if (!internshipDraft.current && !internshipDraft.endDate) {
+      toast.error("Add an end date or mark this as your current internship.");
+      return;
+    }
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    if (internshipDraft.startDate > currentMonth || (!internshipDraft.current && String(internshipDraft.endDate) > currentMonth)) {
+      toast.error("Internship dates cannot be in the future.");
+      return;
+    }
+    if (!internshipDraft.current && internshipDraft.endDate && internshipDraft.endDate < internshipDraft.startDate) {
+      toast.error("End date cannot be before start date.");
+      return;
+    }
+    if (
+      internshipDraft.title.trim().length > PROFILE_LIMITS.internshipTitle ||
+      internshipDraft.company.trim().length > PROFILE_LIMITS.internshipCompany ||
+      (internshipDraft.location?.trim().length || 0) > PROFILE_LIMITS.internshipLocation ||
+      (internshipDraft.description?.trim().length || 0) > PROFILE_LIMITS.internshipDescription
+    ) {
+      toast.error("One or more internship fields exceed the allowed length.");
+      return;
+    }
+    if (!editingInternshipId && internships.length >= 25) {
+      toast.error("You can add up to 25 internship entries.");
+      return;
+    }
+
+    setIsInternshipSaving(true);
+    try {
+      const payload = {
+        ...internshipDraft,
+        title: internshipDraft.title.trim(),
+        company: internshipDraft.company.trim(),
+        location: internshipDraft.location?.trim() || "",
+        description: internshipDraft.description?.trim() || "",
+        endDate: internshipDraft.current ? null : internshipDraft.endDate,
+      };
+      const response = editingInternshipId
+        ? await updateInternship(editingInternshipId, payload)
+        : await addInternship(payload);
+      const nextItems = mapInternships((response as any)?.internships || []);
+      setInternships(nextItems);
+      updateAuthProfile({ internships: nextItems });
+      resetInternshipEditor();
+      toast.success(editingInternshipId ? "Internship updated." : "Internship added.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to save internship.");
+    } finally {
+      setIsInternshipSaving(false);
+    }
+  };
+
+  const handleEditInternship = (item: InternshipItem) => {
+    setEditingInternshipId(item.id);
+    setInternshipDraft({
+      title: item.title,
+      company: item.company,
+      location: item.location || "",
+      startDate: toMonthInput(item.startDate),
+      endDate: toMonthInput(item.endDate),
+      current: Boolean(item.current),
+      description: item.description || "",
+    });
+  };
+
+  const handleDeleteInternship = async (id: string) => {
+    if (deletingInternshipId) return;
+    setDeletingInternshipId(id);
+    try {
+      const response = await deleteInternship(id);
+      const nextItems = mapInternships((response as any)?.internships || []);
+      setInternships(nextItems);
+      updateAuthProfile({ internships: nextItems });
+      if (editingInternshipId === id) resetInternshipEditor();
+      setDeleteInternshipTarget(null);
+      toast.success("Internship removed.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to remove internship.");
+    } finally {
+      setDeletingInternshipId(null);
+    }
+  };
+
+  const resetCertificateEditor = () => {
+    setCertificateDraft(emptyCertificateDraft);
+    setEditingCertificateId(null);
+  };
+
+  const handleSaveCertificate = async () => {
+    if (isCertificateSaving) return;
+    if (!certificateDraft.name.trim() || !certificateDraft.issuer.trim() || !certificateDraft.issueDate) {
+      toast.error("Certificate name, issuer, and issue date are required.");
+      return;
+    }
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    if (certificateDraft.issueDate > currentMonth) {
+      toast.error("Issue date cannot be in the future.");
+      return;
+    }
+    if (certificateDraft.expiryDate && certificateDraft.expiryDate < certificateDraft.issueDate) {
+      toast.error("Expiry date cannot be before the issue date.");
+      return;
+    }
+    if (
+      certificateDraft.name.trim().length > PROFILE_LIMITS.certificateName ||
+      certificateDraft.issuer.trim().length > PROFILE_LIMITS.certificateIssuer ||
+      (certificateDraft.credentialId?.trim().length || 0) > PROFILE_LIMITS.certificateCredentialId ||
+      (certificateDraft.credentialUrl?.trim().length || 0) > PROFILE_LIMITS.certificateCredentialUrl
+    ) {
+      toast.error("One or more certificate fields exceed the allowed length.");
+      return;
+    }
+    if (!editingCertificateId && certificates.length >= 25) {
+      toast.error("You can add up to 25 certificates.");
+      return;
+    }
+
+    setIsCertificateSaving(true);
+    try {
+      const payload = {
+        ...certificateDraft,
+        name: certificateDraft.name.trim(),
+        issuer: certificateDraft.issuer.trim(),
+        credentialId: certificateDraft.credentialId?.trim() || "",
+        credentialUrl: certificateDraft.credentialUrl?.trim() || "",
+        expiryDate: certificateDraft.expiryDate || null,
+      };
+      const response = editingCertificateId
+        ? await updateCertificate(editingCertificateId, payload)
+        : await addCertificate(payload);
+      const nextItems = mapCertificates((response as any)?.certificates || []);
+      setCertificates(nextItems);
+      updateAuthProfile({ certificates: nextItems });
+      resetCertificateEditor();
+      toast.success(editingCertificateId ? "Certificate updated." : "Certificate added.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to save certificate.");
+    } finally {
+      setIsCertificateSaving(false);
+    }
+  };
+
+  const handleEditCertificate = (item: CertificateItem) => {
+    setEditingCertificateId(item.id);
+    setCertificateDraft({
+      name: item.name,
+      issuer: item.issuer,
+      issueDate: toMonthInput(item.issueDate),
+      expiryDate: toMonthInput(item.expiryDate),
+      credentialId: item.credentialId || "",
+      credentialUrl: item.credentialUrl || "",
+    });
+  };
+
+  const handleDeleteCertificate = async (id: string) => {
+    if (deletingCertificateId) return;
+    setDeletingCertificateId(id);
+    try {
+      const response = await deleteCertificate(id);
+      const nextItems = mapCertificates((response as any)?.certificates || []);
+      setCertificates(nextItems);
+      updateAuthProfile({ certificates: nextItems });
+      if (editingCertificateId === id) resetCertificateEditor();
+      setDeleteCertificateTarget(null);
+      toast.success("Certificate removed.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to remove certificate.");
+    } finally {
+      setDeletingCertificateId(null);
+    }
+  };
+
+  const handleRequestPasswordOtp = async () => {
+    if (isAdminRole && !secondaryEmail?.verified) {
+      toast.error(tAdmin("secondaryEmail.required"));
+      return;
+    }
+    if (!securityData.currentPassword) {
+      toast.error("Please enter your current password");
+      return;
+    }
+
+    setIsOtpSending(true);
+    try {
+      await requestPasswordChangeOtp({ currentPassword: securityData.currentPassword });
+      setPasswordOtpRequested(true);
+      setPasswordOtp("");
+      toast.success(isAdminRole ? tAdmin("secondaryEmail.passwordSent") : "OTP sent to your email");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to send OTP");
+    } finally {
+      setIsOtpSending(false);
+    }
+  };
+
+  const handleChangePassword = async () => {
+    if (isAdminRole && !secondaryEmail?.verified) {
+      toast.error(tAdmin("secondaryEmail.required"));
+      return;
+    }
+    if (!passwordOtpRequested) {
+      toast.error("Request OTP first");
+      return;
+    }
+
+    if (!passwordOtp) {
+      toast.error("Please enter the OTP code");
+      return;
+    }
+
+    if (!securityData.currentPassword || !securityData.newPassword || !securityData.confirmPassword) {
+      toast.error("Please fill in all fields");
+      return;
+    }
+
+    if (securityData.newPassword !== securityData.confirmPassword) {
+      toast.error("New passwords do not match");
+      return;
+    }
+
+    setIsPasswordSubmitting(true);
+    try {
+      await confirmPasswordChangeWithOtp({
+        currentPassword: securityData.currentPassword,
+        code: passwordOtp,
+        newPassword: securityData.newPassword,
+      });
+      toast.success("Password changed successfully!");
+      setSecurityData({
+        currentPassword: "",
+        newPassword: "",
+        confirmPassword: "",
+      });
+      setPasswordOtp("");
+      setPasswordOtpRequested(false);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to change password");
+    } finally {
+      setIsPasswordSubmitting(false);
+    }
+  };
+
+  const handleDiscardPassword = () => {
+    setSecurityData({
+      currentPassword: "",
+      newPassword: "",
+      confirmPassword: "",
+    });
+    setPasswordOtp("");
+    setPasswordOtpRequested(false);
+    toast.info("Changes discarded");
+  };
+
+  const handleRevokeSession = async (sessionId: string) => {
+    try {
+      await revokeSession(sessionId);
+      // Immediately update UI by removing the session
+      setSessions(prevSessions => prevSessions.filter((s) => s.id !== sessionId));
+      toast.success("Session revoked successfully");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to revoke session");
+      console.error("Revoke session error:", error);
+    }
+  };
+
+  const handleRevokeAllSessions = async () => {
+    try {
+      await revokeAllSessions();
+      // Clear all sessions from state
+      setSessions([]);
+      toast.success("All sessions revoked. You will be logged out.");
+      // Optionally redirect to login or refresh the page
+      window.location.href = "/sign-in";
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to revoke all sessions");
+    }
+  };
+
+  const handleRevokeTrustedDevice = async (deviceId: string) => {
+    try {
+      await revokeTrustedDevice(deviceId);
+      setTrustedDevices((prev) => prev.filter((d) => d.id !== deviceId));
+      toast.success("Trusted device revoked. It will need a code to sign in again.");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to revoke trusted device");
+      console.error("Revoke trusted device error:", error);
+    }
+  };
+
+  const handleRequestPhoneCode = async () => {
+    const persistedPhone = normalizePhone(originalPersonalInfoRef.current?.phone || "");
+    if (!persistedPhone || normalizePhone(personalInfo.phone) !== persistedPhone) {
+      toast.error("Save your phone number before requesting a verification code.");
+      return;
+    }
+    try {
+      setIsSendingPhoneCode(true);
+      const response = await requestPhoneVerificationOtp();
+      setPhoneCodeRequested(true);
+      setPhoneCodeHint(
+        response.devCode
+          ? `Development code: ${response.devCode}`
+          : response.phoneMasked
+            ? `Code sent to ${response.phoneMasked}`
+            : null
+      );
+      toast.success(response?.message || "Verification code sent");
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to send verification code");
+    } finally {
+      setIsSendingPhoneCode(false);
+    }
+  };
+
+  const handleConfirmPhoneCode = async () => {
+    const normalizedCode = phoneVerificationCode.trim();
+    if (!/^\d{6}$/.test(normalizedCode)) {
+      toast.error("Enter the 6-digit verification code");
+      return;
+    }
+    try {
+      setIsConfirmingPhoneCode(true);
+      await confirmPhoneVerificationOtp({ code: normalizedCode });
+      toast.success("Phone verified successfully");
+      setPhoneVerificationCode("");
+      setPhoneCodeRequested(false);
+      await reloadVerificationStatus();
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to verify phone");
+    } finally {
+      setIsConfirmingPhoneCode(false);
+    }
+  };
+
+  const handleUploadAddressDocument = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploadingAddressDocument(true);
+    try {
+      await uploadAddressDocument(file);
+      toast.success("Address document uploaded successfully");
+      // Reload verification status
+      await reloadVerificationStatus();
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to upload address document");
+    } finally {
+      // Reset so re-picking the same file still fires onChange.
+      e.target.value = "";
+      setIsUploadingAddressDocument(false);
+    }
+  };
+
+  return (
+    <div className="ui-page mx-auto max-w-[1200px] px-4 pb-16 md:px-0">
+      <div className="ui-page-header">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand">Account preferences</p>
+          <h1 className="ui-page-title mt-1">Settings</h1>
+          <p className="ui-page-subtitle">Manage your profile, security, verification, and payment information.</p>
+        </div>
+        <LanguageSettingsCard />
+      </div>
+
+      <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+        {/* Underline tabs, matching the wallet's `WalletSectionPager` strip and
+            both Profile pages. No bottom padding on this wrapper: the variant's
+            own `-mb-px` + `pb-3` is what seats the active underline on the
+            border, and any `pb` here leaves it floating above the line. */}
+        <div className="border-b border-slate-200 px-4 pt-4 sm:px-6 sm:pt-5">
+          <SettingsTabList
+            ariaLabel={tWorker("settings.tabs.ariaMain")}
+            idPrefix="settings-main"
+            options={visibleMainTabs}
+            value={activeTab}
+            onChange={handleMainTabChange}
+            variant="underline"
+          />
+        </div>
+
+        {activeTab === "account" && (
+          <div
+            id="settings-main-panel-account"
+            role="tabpanel"
+            aria-labelledby="settings-main-tab-account"
+            className="p-6"
+          >
+            <div className="mb-6 border-b border-slate-200">
+              <SettingsTabList
+                ariaLabel={tWorker("settings.tabs.ariaAccount")}
+                idPrefix="settings-account"
+                options={visibleAccountTabs}
+                value={accountTab}
+                onChange={handleAccountTabChange}
+                variant="underline"
+              />
+            </div>
+
+            {accountTab === "personal" && (
+              <div
+                id="settings-account-panel-personal"
+                role="tabpanel"
+                aria-labelledby="settings-account-tab-personal"
+              >
+                <form
+                  className="space-y-6"
+                  noValidate
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void handleSavePersonalInfo();
+                  }}
+                >
+                      <div>
+                        <h2 className="text-section font-semibold text-slate-900">
+                          {isEmployerRole ? "Business Information" : "Personal Information"}
+                        </h2>
+                        <p className="text-body-sm text-slate-500">
+                          Update your {isEmployerRole ? "employer profile" : "profile information"}.
+                        </p>
+                        {isProfileLoading && (
+                          <p className="text-caption text-slate-500 mt-1" role="status">Loading profile...</p>
+                        )}
+                      </div>
+
+                      {profileFormError ? (
+                        <div id="settings-profile-error" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-body-sm font-medium text-red-800" role="alert">
+                          {profileFormError}
+                        </div>
+                      ) : null}
+
+                      {!isAdminRole && (
+                        <ProfilePhotoSelector
+                          avatarUrl={resolvedAvatarUrl}
+                          isSubmitting={isAvatarSubmitting}
+                          onUpload={handlePhotoUpload}
+                          onDelete={handleDeletePhoto}
+                        />
+                      )}
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                          <label htmlFor="settings-first-name" className="text-body font-medium text-slate-600 mb-2 block">First name</label>
+                          <input
+                            id="settings-first-name"
+                            type="text"
+                            value={personalInfo.firstName}
+                            maxLength={PROFILE_LIMITS.name}
+                            required
+                            // `readOnly`, not `disabled`, to match the Last name
+                            // field beside it and the `aria-readonly` both
+                            // already declare. `disabled` contradicts that
+                            // attribute and drops the field out of the tab
+                            // order, so a keyboard or screen-reader user could
+                            // not reach their own name to read or copy it.
+                            readOnly
+                            aria-readonly="true"
+                            autoComplete="given-name"
+                            aria-invalid={profileErrorField === "firstName"}
+                            aria-describedby={profileErrorField === "firstName" ? "settings-profile-error" : undefined}
+                            onChange={(e) => handlePersonalInfoChange("firstName", e.target.value)}
+                            className="w-full bg-gray-50 border border-slate-200 rounded-control px-4 py-3 text-body text-[#94A3B8] outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="settings-last-name" className="text-body font-medium text-slate-600 mb-2 block">Last name</label>
+                          <input
+                            id="settings-last-name"
+                            type="text"
+                            value={personalInfo.lastName}
+                            maxLength={PROFILE_LIMITS.name}
+                            required
+                            readOnly
+                            aria-readonly="true"
+                            autoComplete="family-name"
+                            aria-invalid={profileErrorField === "lastName"}
+                            aria-describedby={profileErrorField === "lastName" ? "settings-profile-error" : undefined}
+                            onChange={(e) => handlePersonalInfoChange("lastName", e.target.value)}
+                            className="w-full bg-gray-50 border border-slate-200 rounded-control px-4 py-3 text-body text-[#94A3B8] outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      {isEmployerRole && (
+                        <div>
+                          <label htmlFor="settings-company-name" className="text-body font-medium text-slate-600 mb-2 block">Company name</label>
+                          <input
+                            id="settings-company-name"
+                            type="text"
+                            value={personalInfo.companyName}
+                            maxLength={PROFILE_LIMITS.companyName}
+                            required
+                            autoComplete="organization"
+                            aria-invalid={profileErrorField === "companyName"}
+                            aria-describedby={profileErrorField === "companyName" ? "settings-profile-error" : undefined}
+                            onChange={(e) => handlePersonalInfoChange("companyName", e.target.value)}
+                            placeholder="Enter your company name"
+                            className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                          />
+                        </div>
+                      )}
+
+                      {!isAdminRole && (
+                        <>
+                          {locationDataError ? (
+                            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-body-sm text-amber-900" role="status">
+                              <span>{locationDataError}</span>
+                              <button
+                                type="button"
+                                onClick={() => setLocationReloadKey((value) => value + 1)}
+                                className="min-h-11 rounded-[8px] border border-amber-300 bg-white px-4 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
+                              >
+                                Retry
+                              </button>
+                            </div>
+                          ) : null}
+                          <p className="text-caption text-slate-500">Type to search, or pick from the list.</p>
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div>
+                              <label htmlFor="settings-province" className="text-body font-medium text-slate-600 mb-2 block">Province</label>
+                              <div className="relative">
+                                <input
+                                  id="settings-province"
+                                  list="settings-province-options"
+                                  value={personalInfo.province}
+                                  maxLength={PROFILE_LIMITS.province}
+                                  autoComplete="address-level1"
+                                  disabled={isLoadingLocationData || Boolean(locationDataError)}
+                                  aria-invalid={Boolean(personalInfo.province) && !selectedProvince}
+                                  onChange={(event) => handlePersonalInfoChange("province", event.target.value)}
+                                  placeholder={isLoadingLocationData ? "Loading provinces..." : "Search province"}
+                                  className="w-full bg-white border border-slate-200 rounded-control pl-4 pr-9 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand disabled:bg-slate-50 disabled:text-slate-500"
+                                />
+                                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                              </div>
+                              <datalist id="settings-province-options">
+                                {provinceOptions.map((province) => <option key={province.code} value={province.name} />)}
+                              </datalist>
+                            </div>
+
+                            <div>
+                              <label htmlFor="settings-city" className="text-body font-medium text-slate-600 mb-2 block">City / Municipality</label>
+                              <div className="relative">
+                                <input
+                                  id="settings-city"
+                                  list="settings-city-options"
+                                  value={personalInfo.city}
+                                  maxLength={PROFILE_LIMITS.city}
+                                  autoComplete="address-level2"
+                                  disabled={!selectedProvince || Boolean(locationDataError)}
+                                  aria-invalid={Boolean(personalInfo.city) && !selectedCity}
+                                  onChange={(event) => handlePersonalInfoChange("city", event.target.value)}
+                                  placeholder={selectedProvince ? "Search city or municipality" : "Select province first"}
+                                  className="w-full bg-white border border-slate-200 rounded-control pl-4 pr-9 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand disabled:bg-slate-50 disabled:text-slate-500"
+                                />
+                                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                              </div>
+                              <datalist id="settings-city-options">
+                                {filteredCityOptions.map((city) => <option key={city.code} value={city.name} />)}
+                              </datalist>
+                            </div>
+
+                            <div>
+                              <label htmlFor="settings-barangay" className="text-body font-medium text-slate-600 mb-2 block">Barangay</label>
+                              <div className="relative">
+                                <input
+                                  id="settings-barangay"
+                                  list="settings-barangay-options"
+                                  value={personalInfo.barangay}
+                                  maxLength={PROFILE_LIMITS.barangay}
+                                  disabled={!selectedCity || isLoadingBarangays || Boolean(barangayDataError)}
+                                  aria-invalid={Boolean(personalInfo.barangay) && !selectedBarangay}
+                                  aria-describedby={barangayDataError ? "settings-barangay-help" : undefined}
+                                  onChange={(event) => handlePersonalInfoChange("barangay", event.target.value)}
+                                  placeholder={!selectedCity ? "Select city first" : isLoadingBarangays ? "Loading barangays..." : "Search barangay"}
+                                  className="w-full bg-white border border-slate-200 rounded-control pl-4 pr-9 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand disabled:bg-slate-50 disabled:text-slate-500"
+                                />
+                                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                              </div>
+                              <datalist id="settings-barangay-options">
+                                {barangayOptions.map((barangay) => <option key={barangay.code} value={barangay.name} />)}
+                              </datalist>
+                              {barangayDataError ? <p id="settings-barangay-help" className="mt-1 text-caption text-amber-800">{barangayDataError}</p> : null}
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                              <label htmlFor="settings-location-type" className="text-body font-medium text-slate-600 mb-2 block">Location type</label>
+                              <select
+                                id="settings-location-type"
+                                value={personalInfo.addressType}
+                                onChange={(e) => handlePersonalInfoChange("addressType", e.target.value)}
+                                className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                              >
+                                <option value="home">Home address</option>
+                                <option value="office">Office / Business address</option>
+                                <option value="place">Landmark / Place</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label htmlFor="settings-address" className="text-body font-medium text-slate-600 mb-2 block">Address / Place</label>
+                              <div className="relative">
+                                <input
+                                  id="settings-address"
+                                  type="text"
+                                  list="settings-address-options"
+                                  value={personalInfo.address}
+                                  maxLength={PROFILE_LIMITS.address}
+                                  autoComplete="street-address"
+                                  aria-invalid={profileErrorField === "address"}
+                                  aria-describedby={profileErrorField === "address" ? "settings-profile-error" : undefined}
+                                  onChange={(e) => handlePersonalInfoChange("address", e.target.value)}
+                                  placeholder={personalInfo.addressType === "place" ? "e.g., Near City Hall" : "House no., street, subdivision"}
+                                  className="w-full bg-white border border-slate-200 rounded-control pl-4 pr-9 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                                />
+                                {addressSuggestions.length > 0 ? (
+                                  <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+
+                          <datalist id="settings-address-options">
+                            {addressSuggestions.map((item) => (
+                              <option key={item} value={item} />
+                            ))}
+                          </datalist>
+                        </>
+                      )}
+
+                      {!isAdminRole && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                          <div>
+                            <label htmlFor="settings-phone" className="mb-2 block text-body font-medium text-slate-600">
+                              Phone number
+                              <span className={`ml-1 text-caption font-semibold ${isCurrentPhoneVerified ? "text-emerald-700" : "text-slate-500"}`}>
+                                ({isCurrentPhoneVerified ? "Phone number verified" : "Phone number not verified"})
+                              </span>
+                            </label>
+                            <input
+                              id="settings-phone"
+                              type="tel"
+                              value={personalInfo.phone}
+                              readOnly={isCurrentPhoneVerified}
+                              aria-readonly={isCurrentPhoneVerified}
+                              autoComplete="tel"
+                              inputMode="tel"
+                              aria-invalid={profileErrorField === "phone"}
+                              aria-describedby={profileErrorField === "phone" ? "settings-profile-error" : undefined}
+                              maxLength={20}
+                              onChange={(e) => handlePersonalInfoChange("phone", e.target.value)}
+                              placeholder="e.g., 0917 123 4567"
+                              className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="settings-employer-email" className="text-body font-medium text-slate-600 mb-2 block">Email</label>
+                            <input
+                              id="settings-employer-email"
+                              type="email"
+                              value={personalInfo.email}
+                              disabled
+                              className="w-full bg-gray-50 border border-slate-200 rounded-control px-4 py-3 text-body text-[#94A3B8] outline-none"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {isAdminRole && (
+                        <StaffSecondaryEmail status={secondaryEmail} error={secondaryEmailError}
+                          onRetry={() => setSecondaryEmailReload((value) => value + 1)}
+                          onVerified={(status) => { setSecondaryEmail(status); updateAuthProfile({ otpEnabled: status.verified }); setPasswordOtpRequested(false); setPasswordOtp(""); }} />
+                      )}
+
+                      {isAdminRole && (
+                        <div>
+                          <label htmlFor="settings-worker-email" className="text-body font-medium text-slate-600 mb-2 block">Email</label>
+                          <input
+                            id="settings-worker-email"
+                            type="email"
+                            value={personalInfo.email}
+                            disabled
+                            className="w-full bg-gray-50 border border-slate-200 rounded-control px-4 py-3 text-body text-[#94A3B8] outline-none"
+                          />
+                        </div>
+                      )}
+
+                      {!isAdminRole && (
+                        <>
+                          <div>
+                            <label htmlFor="settings-about" className="text-body font-medium text-slate-600 mb-2 block">About Me</label>
+                            <textarea
+                              id="settings-about"
+                              value={personalInfo.about}
+                              maxLength={PROFILE_LIMITS.about}
+                              aria-invalid={profileErrorField === "about"}
+                              aria-describedby={profileErrorField === "about" ? "settings-profile-error settings-about-count" : "settings-about-count"}
+                              onChange={(e) => handlePersonalInfoChange("about", e.target.value)}
+                              placeholder="Tell us about yourself, your experience, and what you're passionate about..."
+                              className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all resize-none"
+                              rows={4}
+                            />
+                            <p id="settings-about-count" className="mt-1 text-right text-caption text-slate-500">
+                              {personalInfo.about.length}/{PROFILE_LIMITS.about}
+                            </p>
+                          </div>
+
+                          <div>
+                            <label htmlFor="settings-job-position" className="text-body font-medium text-slate-600 mb-2 block">Professional headline</label>
+                            <input
+                              id="settings-job-position"
+                              type="text"
+                              value={personalInfo.jobPosition}
+                              onChange={(e) => handlePersonalInfoChange("jobPosition", e.target.value)}
+                              placeholder="e.g., House cleaner, Tutor, Delivery specialist"
+                              maxLength={PROFILE_LIMITS.jobPosition}
+                              aria-invalid={profileErrorField === "jobPosition"}
+                              aria-describedby={profileErrorField === "jobPosition" ? "settings-profile-error" : undefined}
+                              className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                              <label htmlFor="settings-linkedin" className="text-body font-medium text-slate-600 mb-2 block">LinkedIn URL</label>
+                              <input
+                                id="settings-linkedin"
+                                type="url"
+                                value={personalInfo.linkedin}
+                                onChange={(e) => handlePersonalInfoChange("linkedin", e.target.value)}
+                                placeholder="https://linkedin.com/in/your-name"
+                                maxLength={PROFILE_LIMITS.url}
+                                autoComplete="url"
+                                aria-invalid={profileErrorField === "linkedin"}
+                                aria-describedby={profileErrorField === "linkedin" ? "settings-profile-error" : undefined}
+                                className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                              />
+                            </div>
+                            <div>
+                              <label htmlFor="settings-website" className="text-body font-medium text-slate-600 mb-2 block">Portfolio or website</label>
+                              <input
+                                id="settings-website"
+                                type="url"
+                                value={personalInfo.website}
+                                onChange={(e) => handlePersonalInfoChange("website", e.target.value)}
+                                placeholder="https://your-portfolio.example"
+                                maxLength={PROFILE_LIMITS.url}
+                                autoComplete="url"
+                                aria-invalid={profileErrorField === "website"}
+                                aria-describedby={profileErrorField === "website" ? "settings-profile-error" : undefined}
+                                className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <label htmlFor="settings-experience" className="text-body font-medium text-slate-600 mb-2 block">Total Experience</label>
+                            <select
+                              id="settings-experience"
+                              value={experienceStats.totalExperience}
+                              onChange={(e) => setExperienceStats({ ...experienceStats, totalExperience: e.target.value })}
+                              className="w-full bg-white border border-slate-200 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                            >
+                              <option value="">Select experience</option>
+                              <option value="Less than 1 Year">Less than 1 Year</option>
+                              <option value="1 Year">1 Year</option>
+                              <option value="2 Years">2 Years</option>
+                              <option value="3 Years">3 Years</option>
+                              <option value="4 Years">4 Years</option>
+                              <option value="5 Years">5 Years</option>
+                              <option value="6 Years">6 Years</option>
+                              <option value="7 Years">7 Years</option>
+                              <option value="8 Years">8 Years</option>
+                              <option value="9 Years">9 Years</option>
+                              <option value="10+ Years">10+ Years</option>
+                            </select>
+                          </div>
+
+                        </>
+                      )}
+
+                      <div className="flex justify-end sticky bottom-0 z-10 -mx-6 mt-6 border-t border-slate-200 bg-white px-6 py-4">
+                        <button
+                          type="submit"
+                          disabled={isProfileSaving || isProfileLoading}
+                          aria-busy={isProfileSaving || isProfileLoading}
+                          className={`bg-brand text-white font-semibold px-8 py-3 rounded-control transition-all ${
+                            isProfileSaving || isProfileLoading ? "opacity-70 cursor-not-allowed" : "hover:opacity-90"
+                          }`}
+                        >
+                          {isProfileSaving ? tCommon("settings.saving") : isProfileLoading ? tCommon("loading") : tCommon("settings.saveChanges")}
+                        </button>
+                      </div>
+                </form>
+
+              </div>
+                  )}
+
+                  {accountTab === "experience" && !isEmployerRole && (
+                    <div
+                      id="settings-account-panel-experience"
+                      role="tabpanel"
+                      aria-labelledby="settings-account-tab-experience"
+                      className="space-y-6"
+                    >
+                      <div>
+                        <h2 className="text-section font-semibold text-slate-900">Skills & Experience</h2>
+                        <p className="text-body-sm text-slate-500">Add and manage your skills, work history, internships, and certificates.</p>
+                      </div>
+
+                      <div className="rounded-card border border-slate-200 bg-white p-6 space-y-5">
+                        <div>
+                          <h3 className="text-section font-semibold text-slate-900">
+                            {editingExperienceId ? "Edit work experience" : "Add work experience"}
+                          </h3>
+                          <p className="mt-1 text-body-sm text-slate-500">Show employers the roles, client work, or self-employment that support your skills.</p>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label htmlFor="experience-title" className="text-body-sm font-medium text-slate-600 mb-2 block">Job title *</label>
+                            <input id="experience-title" value={experienceDraft.title} onChange={(e) => setExperienceDraft((prev) => ({ ...prev, title: e.target.value }))} maxLength={100} placeholder="e.g., Math tutor" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="experience-company" className="text-body-sm font-medium text-slate-600 mb-2 block">Company or client *</label>
+                            <input id="experience-company" value={experienceDraft.company} onChange={(e) => setExperienceDraft((prev) => ({ ...prev, company: e.target.value }))} maxLength={120} placeholder="e.g., Self-employed" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="experience-location" className="text-body-sm font-medium text-slate-600 mb-2 block">Location</label>
+                            <input id="experience-location" value={experienceDraft.location} onChange={(e) => setExperienceDraft((prev) => ({ ...prev, location: e.target.value }))} maxLength={120} placeholder="City or Remote" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label htmlFor="experience-start" className="text-body-sm font-medium text-slate-600 mb-2 block">Start *</label>
+                              <input id="experience-start" type="month" value={experienceDraft.startDate} onChange={(e) => setExperienceDraft((prev) => ({ ...prev, startDate: e.target.value }))} className="w-full border border-slate-200 rounded-control px-3 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                            </div>
+                            <div>
+                              <label htmlFor="experience-end" className="text-body-sm font-medium text-slate-600 mb-2 block">End *</label>
+                              <input id="experience-end" type="month" value={experienceDraft.endDate || ""} onChange={(e) => setExperienceDraft((prev) => ({ ...prev, endDate: e.target.value }))} disabled={experienceDraft.current} className="w-full border border-slate-200 rounded-control px-3 py-3 text-body outline-none focus:ring-2 focus:ring-brand disabled:bg-[#F1F5F9]" />
+                            </div>
+                          </div>
+                        </div>
+
+                        <label className="flex items-center gap-2 text-body-sm text-slate-600 cursor-pointer">
+                          <input type="checkbox" checked={experienceDraft.current} onChange={(e) => setExperienceDraft((prev) => ({ ...prev, current: e.target.checked, endDate: e.target.checked ? "" : prev.endDate }))} className="w-4 h-4" />
+                          I currently work here
+                        </label>
+
+                        <div>
+                          <label htmlFor="experience-description" className="text-body-sm font-medium text-slate-600 mb-2 block">Description</label>
+                          <textarea id="experience-description" value={experienceDraft.description} onChange={(e) => setExperienceDraft((prev) => ({ ...prev, description: e.target.value }))} maxLength={1000} rows={3} placeholder="Describe your responsibilities and results" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand resize-none" />
+                        </div>
+
+                        <div className="flex flex-wrap gap-3">
+                          <button type="button" onClick={handleSaveExperience} disabled={isExperienceSaving} className="bg-brand text-white font-semibold px-5 py-2.5 rounded-control disabled:opacity-60">
+                            {isExperienceSaving ? "Saving..." : editingExperienceId ? "Save experience" : "Add experience"}
+                          </button>
+                          {editingExperienceId && (
+                            <button type="button" onClick={resetExperienceEditor} className="bg-[#F1F5F9] text-slate-600 font-semibold px-5 py-2.5 rounded-control">Cancel</button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-section font-semibold text-slate-900">Work history</h3>
+                          <span className="text-caption text-slate-500">{workExperiences.length} {workExperiences.length === 1 ? "entry" : "entries"}</span>
+                        </div>
+                        {workExperiences.length ? workExperiences.map((item) => (
+                          <div key={item.id} className="rounded-card border border-slate-200 bg-slate-50 p-5 flex items-start justify-between gap-4">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[15px] font-semibold text-slate-900">{item.title}</p>
+                              <p className="text-body-sm text-slate-600">{[item.company, item.location].filter(Boolean).join(" · ")}</p>
+                              <p className="mt-1 text-caption text-slate-500">{formatExperienceMonth(item.startDate)} – {item.current ? "Present" : formatExperienceMonth(item.endDate)}</p>
+                              {item.description ? <p className="mt-3 text-body-sm text-slate-600 whitespace-pre-line">{item.description}</p> : null}
+
+                              <div className="mt-3">
+                                <p className="text-caption font-semibold text-slate-500 mb-2">Media</p>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {(item.media || []).map((media) => {
+                                    const mediaUrl = toAbsoluteAssetUrl(media.url);
+                                    const mediaId = media._id || media.url;
+                                    if (!mediaUrl) return null;
+                                    return (
+                                      <div key={mediaId} className="relative h-16 w-16 shrink-0">
+                                        <img src={mediaUrl} alt={media.originalName || item.title} className="h-full w-full rounded-lg border border-slate-200 object-cover" />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteExperienceMedia(item.id, mediaId)}
+                                          disabled={mediaDeletingId === mediaId}
+                                          aria-label={`Remove photo from ${item.title}`}
+                                          aria-busy={mediaDeletingId === mediaId}
+                                          className="absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-white text-[#EF4444] shadow ring-1 ring-slate-200 hover:bg-[#FEE2E2] disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#EF4444]"
+                                        >
+                                          <XCircle className="h-4 w-4" />
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                  {(item.media?.length || 0) < PROFILE_LIMITS.experienceMediaPerEntry ? (
+                                    <label className="flex h-16 w-16 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-slate-300 text-slate-400 hover:border-brand hover:text-brand focus-within:ring-2 focus-within:ring-brand">
+                                      <Upload className="h-4 w-4" />
+                                      <span className="text-[10px] font-semibold">{mediaUploadingId === item.id ? "…" : "Add"}</span>
+                                      <input
+                                        type="file"
+                                        accept=".jpg,.jpeg,.png,.gif,.webp"
+                                        onChange={(e) => handleUploadExperienceMedia(item.id, e)}
+                                        disabled={mediaUploadingId === item.id}
+                                        aria-label={`Add a photo to ${item.title}`}
+                                        className="sr-only"
+                                      />
+                                    </label>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              <button type="button" onClick={() => handleEditExperience(item)} className="text-caption font-semibold text-brand px-3 py-2 rounded-[8px] hover:bg-[#DBEAFE]">Edit</button>
+                              <button type="button" onClick={() => setDeleteExperienceTarget(item)} aria-label={`Delete ${item.title} experience`} className="text-[#EF4444] p-2 rounded-[8px] hover:bg-[#FEE2E2]"><Trash2 className="w-4 h-4" /></button>
+                            </div>
+                          </div>
+                        )) : (
+                          <div className="rounded-card border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-body-sm text-slate-500">No work history added yet.</div>
+                        )}
+                      </div>
+
+                      <div className="rounded-card border border-slate-200 bg-white p-6 space-y-5">
+                        <div>
+                          <h3 className="text-section font-semibold text-slate-900">
+                            {editingInternshipId ? "Edit internship" : "Add internship"}
+                          </h3>
+                          <p className="mt-1 text-body-sm text-slate-500">Internships are shown separately from paid work experience on your profile.</p>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label htmlFor="internship-title" className="text-body-sm font-medium text-slate-600 mb-2 block">Title *</label>
+                            <input id="internship-title" value={internshipDraft.title} onChange={(e) => setInternshipDraft((prev) => ({ ...prev, title: e.target.value }))} maxLength={100} placeholder="e.g., Marketing Intern" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="internship-company" className="text-body-sm font-medium text-slate-600 mb-2 block">Company *</label>
+                            <input id="internship-company" value={internshipDraft.company} onChange={(e) => setInternshipDraft((prev) => ({ ...prev, company: e.target.value }))} maxLength={120} placeholder="e.g., Acme Co." className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="internship-location" className="text-body-sm font-medium text-slate-600 mb-2 block">Location</label>
+                            <input id="internship-location" value={internshipDraft.location} onChange={(e) => setInternshipDraft((prev) => ({ ...prev, location: e.target.value }))} maxLength={120} placeholder="City or Remote" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label htmlFor="internship-start" className="text-body-sm font-medium text-slate-600 mb-2 block">Start *</label>
+                              <input id="internship-start" type="month" value={internshipDraft.startDate} onChange={(e) => setInternshipDraft((prev) => ({ ...prev, startDate: e.target.value }))} className="w-full border border-slate-200 rounded-control px-3 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                            </div>
+                            <div>
+                              <label htmlFor="internship-end" className="text-body-sm font-medium text-slate-600 mb-2 block">End *</label>
+                              <input id="internship-end" type="month" value={internshipDraft.endDate || ""} onChange={(e) => setInternshipDraft((prev) => ({ ...prev, endDate: e.target.value }))} disabled={internshipDraft.current} className="w-full border border-slate-200 rounded-control px-3 py-3 text-body outline-none focus:ring-2 focus:ring-brand disabled:bg-[#F1F5F9]" />
+                            </div>
+                          </div>
+                        </div>
+
+                        <label className="flex items-center gap-2 text-body-sm text-slate-600 cursor-pointer">
+                          <input type="checkbox" checked={internshipDraft.current} onChange={(e) => setInternshipDraft((prev) => ({ ...prev, current: e.target.checked, endDate: e.target.checked ? "" : prev.endDate }))} className="w-4 h-4" />
+                          I currently intern here
+                        </label>
+
+                        <div>
+                          <label htmlFor="internship-description" className="text-body-sm font-medium text-slate-600 mb-2 block">Description</label>
+                          <textarea id="internship-description" value={internshipDraft.description} onChange={(e) => setInternshipDraft((prev) => ({ ...prev, description: e.target.value }))} maxLength={1000} rows={3} placeholder="Describe your responsibilities and results" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand resize-none" />
+                        </div>
+
+                        <div className="flex flex-wrap gap-3">
+                          <button type="button" onClick={handleSaveInternship} disabled={isInternshipSaving} className="bg-brand text-white font-semibold px-5 py-2.5 rounded-control disabled:opacity-60">
+                            {isInternshipSaving ? "Saving..." : editingInternshipId ? "Save internship" : "Add internship"}
+                          </button>
+                          {editingInternshipId && (
+                            <button type="button" onClick={resetInternshipEditor} className="bg-[#F1F5F9] text-slate-600 font-semibold px-5 py-2.5 rounded-control">Cancel</button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-section font-semibold text-slate-900">Internships</h3>
+                          <span className="text-caption text-slate-500">{internships.length} {internships.length === 1 ? "entry" : "entries"}</span>
+                        </div>
+                        {internships.length ? internships.map((item) => (
+                          <div key={item.id} className="rounded-card border border-slate-200 bg-slate-50 p-5 flex items-start justify-between gap-4">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[15px] font-semibold text-slate-900">{item.title}</p>
+                              <p className="text-body-sm text-slate-600">{[item.company, item.location].filter(Boolean).join(" · ")}</p>
+                              <p className="mt-1 text-caption text-slate-500">{formatExperienceMonth(item.startDate)} – {item.current ? "Present" : formatExperienceMonth(item.endDate)}</p>
+                              {item.description ? <p className="mt-3 text-body-sm text-slate-600 whitespace-pre-line">{item.description}</p> : null}
+                            </div>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              <button type="button" onClick={() => handleEditInternship(item)} className="text-caption font-semibold text-brand px-3 py-2 rounded-[8px] hover:bg-[#DBEAFE]">Edit</button>
+                              <button type="button" onClick={() => setDeleteInternshipTarget(item)} aria-label={`Delete ${item.title} internship`} className="text-[#EF4444] p-2 rounded-[8px] hover:bg-[#FEE2E2]"><Trash2 className="w-4 h-4" /></button>
+                            </div>
+                          </div>
+                        )) : (
+                          <div className="rounded-card border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-body-sm text-slate-500">No internships added yet.</div>
+                        )}
+                      </div>
+
+                      <div className="rounded-card border border-slate-200 bg-white p-6 space-y-5">
+                        <div>
+                          <h3 className="text-section font-semibold text-slate-900">
+                            {editingCertificateId ? "Edit certificate" : "Add certificate"}
+                          </h3>
+                          <p className="mt-1 text-body-sm text-slate-500">Add licenses or certifications employers can verify.</p>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label htmlFor="certificate-name" className="text-body-sm font-medium text-slate-600 mb-2 block">Certificate name *</label>
+                            <input id="certificate-name" value={certificateDraft.name} onChange={(e) => setCertificateDraft((prev) => ({ ...prev, name: e.target.value }))} maxLength={120} placeholder="e.g., AWS Solutions Architect" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="certificate-issuer" className="text-body-sm font-medium text-slate-600 mb-2 block">Issuing organization *</label>
+                            <input id="certificate-issuer" value={certificateDraft.issuer} onChange={(e) => setCertificateDraft((prev) => ({ ...prev, issuer: e.target.value }))} maxLength={120} placeholder="e.g., Amazon Web Services" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="certificate-issue-date" className="text-body-sm font-medium text-slate-600 mb-2 block">Issue date *</label>
+                            <input id="certificate-issue-date" type="month" value={certificateDraft.issueDate} onChange={(e) => setCertificateDraft((prev) => ({ ...prev, issueDate: e.target.value }))} className="w-full border border-slate-200 rounded-control px-3 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="certificate-expiry-date" className="text-body-sm font-medium text-slate-600 mb-2 block">Expiry date</label>
+                            <input id="certificate-expiry-date" type="month" value={certificateDraft.expiryDate || ""} onChange={(e) => setCertificateDraft((prev) => ({ ...prev, expiryDate: e.target.value }))} placeholder="Leave blank if it never expires" className="w-full border border-slate-200 rounded-control px-3 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="certificate-credential-id" className="text-body-sm font-medium text-slate-600 mb-2 block">Credential ID</label>
+                            <input id="certificate-credential-id" value={certificateDraft.credentialId} onChange={(e) => setCertificateDraft((prev) => ({ ...prev, credentialId: e.target.value }))} maxLength={80} placeholder="Optional" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                          <div>
+                            <label htmlFor="certificate-credential-url" className="text-body-sm font-medium text-slate-600 mb-2 block">Credential URL</label>
+                            <input id="certificate-credential-url" type="url" value={certificateDraft.credentialUrl} onChange={(e) => setCertificateDraft((prev) => ({ ...prev, credentialUrl: e.target.value }))} maxLength={500} placeholder="https://…" className="w-full border border-slate-200 rounded-control px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand" />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-3">
+                          <button type="button" onClick={handleSaveCertificate} disabled={isCertificateSaving} className="bg-brand text-white font-semibold px-5 py-2.5 rounded-control disabled:opacity-60">
+                            {isCertificateSaving ? "Saving..." : editingCertificateId ? "Save certificate" : "Add certificate"}
+                          </button>
+                          {editingCertificateId && (
+                            <button type="button" onClick={resetCertificateEditor} className="bg-[#F1F5F9] text-slate-600 font-semibold px-5 py-2.5 rounded-control">Cancel</button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-section font-semibold text-slate-900">Certificates</h3>
+                          <span className="text-caption text-slate-500">{certificates.length} {certificates.length === 1 ? "entry" : "entries"}</span>
+                        </div>
+                        {certificates.length ? certificates.map((item) => (
+                          <div key={item.id} className="rounded-card border border-slate-200 bg-slate-50 p-5 flex items-start justify-between gap-4">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[15px] font-semibold text-slate-900">{item.name}</p>
+                              <p className="text-body-sm text-slate-600">{item.issuer}</p>
+                              <p className="mt-1 text-caption text-slate-500">
+                                {formatExperienceMonth(item.issueDate)}
+                                {item.expiryDate ? ` – ${formatExperienceMonth(item.expiryDate)}` : " · No expiry"}
+                              </p>
+                              {item.credentialId ? <p className="mt-1 text-caption text-slate-500">Credential ID: {item.credentialId}</p> : null}
+                            </div>
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              <button type="button" onClick={() => handleEditCertificate(item)} className="text-caption font-semibold text-brand px-3 py-2 rounded-[8px] hover:bg-[#DBEAFE]">Edit</button>
+                              <button type="button" onClick={() => setDeleteCertificateTarget(item)} aria-label={`Delete ${item.name} certificate`} className="text-[#EF4444] p-2 rounded-[8px] hover:bg-[#FEE2E2]"><Trash2 className="w-4 h-4" /></button>
+                            </div>
+                          </div>
+                        )) : (
+                          <div className="rounded-card border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-body-sm text-slate-500">No certificates added yet.</div>
+                        )}
+                      </div>
+
+                      <div className="bg-brand/[0.08] border border-brand/20 rounded-card p-6">
+                        <h3 className="text-section font-semibold text-slate-900 mb-4">Add New Skill</h3>
+                        <div className="space-y-4">
+                          {/* Skill Selection Mode */}
+                          <div>
+                            <p className="text-body font-medium text-slate-600 mb-2 block">Choose Option</p>
+                            <div className="flex gap-4">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name="skillMode"
+                                  checked={skillSelectionMode === "predefined"}
+                                  onChange={() => setSkillSelectionMode("predefined")}
+                                  className="w-4 h-4 text-brand"
+                                />
+                                <span className="text-body text-slate-600">Select from list</span>
+                              </label>
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name="skillMode"
+                                  checked={skillSelectionMode === "custom"}
+                                  onChange={() => setSkillSelectionMode("custom")}
+                                  className="w-4 h-4 text-brand"
+                                />
+                                <span className="text-body text-slate-600">Custom skill</span>
+                              </label>
+                            </div>
+                          </div>
+
+                          {/* Skill Name Input */}
+                          <div>
+                            <p id="settings-skill-name-label" className="text-body font-medium text-slate-600 mb-2 block">Skill Name</p>
+                            {skillSelectionMode === "predefined" ? (
+                              <select
+                                aria-labelledby="settings-skill-name-label"
+                                value={selectedPredefinedSkill}
+                                onChange={(e) => setSelectedPredefinedSkill(e.target.value)}
+                                className="w-full bg-white border border-brand/20 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                              >
+                                <option value="">Select a skill</option>
+                                <optgroup label="Household & Cleaning">
+                                  <option value="House Cleaning">House Cleaning</option>
+                                  <option value="Window Cleaning">Window Cleaning</option>
+                                  <option value="Laundry Service">Laundry Service</option>
+                                  <option value="Ironing">Ironing</option>
+                                  <option value="Kitchen Cleaning">Kitchen Cleaning</option>
+                                  <option value="Bathroom Cleaning">Bathroom Cleaning</option>
+                                </optgroup>
+                                <optgroup label="Gardening & Landscaping">
+                                  <option value="Gardening">Gardening</option>
+                                  <option value="Lawn Mowing">Lawn Mowing</option>
+                                  <option value="Landscaping">Landscaping</option>
+                                  <option value="Plant Care">Plant Care</option>
+                                  <option value="Weeding">Weeding</option>
+                                  <option value="Hedge Trimming">Hedge Trimming</option>
+                                </optgroup>
+                                <optgroup label="Shopping & Delivery">
+                                  <option value="Shopping">Shopping</option>
+                                  <option value="Grocery Shopping">Grocery Shopping</option>
+                                  <option value="Delivery Service">Delivery Service</option>
+                                  <option value="Errand Running">Errand Running</option>
+                                  <option value="Package Pickup">Package Pickup</option>
+                                </optgroup>
+                                <optgroup label="Academic & Tutoring">
+                                  <option value="Tutoring">Tutoring</option>
+                                  <option value="Math Tutoring">Math Tutoring</option>
+                                  <option value="English Tutoring">English Tutoring</option>
+                                  <option value="Language Tutoring">Language Tutoring</option>
+                                  <option value="Science Tutoring">Science Tutoring</option>
+                                  <option value="Homework Help">Homework Help</option>
+                                  <option value="Test Preparation">Test Preparation</option>
+                                </optgroup>
+                                <optgroup label="Languages & Translation">
+                                  <option value="English Speaking">English Speaking</option>
+                                  <option value="Translation Service">Translation Service</option>
+                                  <option value="Language Coaching">Language Coaching</option>
+                                  <option value="Pronunciation Training">Pronunciation Training</option>
+                                </optgroup>
+                                <optgroup label="Fitness & Wellness">
+                                  <option value="Personal Training">Personal Training</option>
+                                  <option value="Yoga Instruction">Yoga Instruction</option>
+                                  <option value="Fitness Coaching">Fitness Coaching</option>
+                                  <option value="Walking Companion">Walking Companion</option>
+                                </optgroup>
+                                <optgroup label="Pet Care">
+                                  <option value="Dog Walking">Dog Walking</option>
+                                  <option value="Pet Sitting">Pet Sitting</option>
+                                  <option value="Pet Grooming">Pet Grooming</option>
+                                  <option value="Pet Training">Pet Training</option>
+                                </optgroup>
+                                <optgroup label="Handyman & Repairs">
+                                  <option value="Handyman Services">Handyman Services</option>
+                                  <option value="Painting">Painting</option>
+                                  <option value="Carpentry">Carpentry</option>
+                                  <option value="Plumbing Assistance">Plumbing Assistance</option>
+                                  <option value="Furniture Assembly">Furniture Assembly</option>
+                                  <option value="Electrical Assistance">Electrical Assistance</option>
+                                </optgroup>
+                                <optgroup label="Cooking & Food">
+                                  <option value="Meal Preparation">Meal Preparation</option>
+                                  <option value="Cooking">Cooking</option>
+                                  <option value="Baking">Baking</option>
+                                  <option value="Food Delivery">Food Delivery</option>
+                                  <option value="Kitchen Help">Kitchen Help</option>
+                                </optgroup>
+                                <optgroup label="Childcare & Babysitting">
+                                  <option value="Babysitting">Babysitting</option>
+                                  <option value="Childcare">Childcare</option>
+                                  <option value="After-School Care">After-School Care</option>
+                                  <option value="Tutoring Kids">Tutoring Kids</option>
+                                </optgroup>
+                                <optgroup label="Administrative & Technical">
+                                  <option value="Data Entry">Data Entry</option>
+                                  <option value="Virtual Assistant">Virtual Assistant</option>
+                                  <option value="Typing Services">Typing Services</option>
+                                  <option value="Transcription">Transcription</option>
+                                  <option value="Email Management">Email Management</option>
+                                </optgroup>
+                                <optgroup label="Creative Services">
+                                  <option value="Social Media Management">Social Media Management</option>
+                                  <option value="Photography">Photography</option>
+                                  <option value="Graphic Design">Graphic Design</option>
+                                  <option value="Content Writing">Content Writing</option>
+                                  <option value="Video Editing">Video Editing</option>
+                                </optgroup>
+                                <optgroup label="Moving & Heavy Lifting">
+                                  <option value="Moving Help">Moving Help</option>
+                                  <option value="Heavy Lifting">Heavy Lifting</option>
+                                  <option value="Packing Service">Packing Service</option>
+                                </optgroup>
+                                <optgroup label="Event Services">
+                                  <option value="Event Setup">Event Setup</option>
+                                  <option value="Event Planning">Event Planning</option>
+                                  <option value="Party Hosting Assistance">Party Hosting Assistance</option>
+                                  <option value="Decoration">Decoration</option>
+                                </optgroup>
+                              </select>
+                            ) : (
+                              <input
+                                aria-labelledby="settings-skill-name-label"
+                                type="text"
+                                value={newSkillName}
+                                maxLength={PROFILE_LIMITS.skillName}
+                                onChange={(e) => setNewSkillName(e.target.value)}
+                                placeholder="e.g., Flutter, Blockchain, Video Editing"
+                                className="w-full bg-white border border-brand/20 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all"
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void handleAddSkill();
+                                  }
+                                }}
+                              />
+                            )}
+                          </div>
+
+                          <div>
+                            <label htmlFor="settings-skill-description" className="text-body font-medium text-slate-600 mb-2 block">Description or experience note</label>
+                            <textarea
+                              id="settings-skill-description"
+                              value={newSkillDescription}
+                              maxLength={PROFILE_LIMITS.skillDescription}
+                              aria-describedby="settings-skill-description-count"
+                              onChange={(e) => setNewSkillDescription(e.target.value)}
+                              placeholder="Optional: describe what you can do or your experience with this skill"
+                              className="w-full bg-white border border-brand/20 rounded-control px-4 py-3 text-body text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all resize-none"
+                              rows={3}
+                            />
+                            <p id="settings-skill-description-count" className="mt-1 text-right text-caption text-slate-500">
+                              {newSkillDescription.length}/{PROFILE_LIMITS.skillDescription}
+                            </p>
+                          </div>
+
+                          <button
+                            onClick={handleAddSkill}
+                            disabled={Boolean(skillMutationId)}
+                            aria-busy={skillMutationId === "new"}
+                            className="w-full bg-brand text-white font-semibold py-2.5 px-4 rounded-control hover:opacity-90 transition-all"
+                          >
+                            {skillMutationId === "new" ? "Saving..." : "Add Skill"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {skills.length > 0 ? (
+                        <div>
+                          <h3 className="text-body font-semibold text-slate-900 mb-3">Your Skills</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {skills.map((skill) => (
+                              <div
+                                key={skill.id}
+                                className="bg-white border border-slate-200 rounded-control p-4 flex items-start justify-between hover:shadow-md transition-all"
+                              >
+                                <div className="flex-1">
+                                  <p className="text-body font-semibold text-slate-900">{skill.name}</p>
+                                  {editingSkillId === skill.id ? (
+                                    <div className="mt-3 space-y-3">
+                                      <textarea
+                                        aria-label={`Description for ${skill.name}`}
+                                        value={editingSkillDescription}
+                                        maxLength={PROFILE_LIMITS.skillDescription}
+                                        onChange={(e) => setEditingSkillDescription(e.target.value)}
+                                        placeholder="Describe your experience with this skill"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-control px-3 py-2 text-body-sm text-slate-900 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition-all resize-none"
+                                        rows={3}
+                                      />
+                                      <div className="flex items-center gap-2">
+                                        <button
+                                          onClick={() => handleEditSkillDescription(skill.id)}
+                                          disabled={skillMutationId === skill.id}
+                                          className="bg-brand text-white text-caption font-semibold px-3 py-2 rounded-[8px] hover:opacity-90 transition-all"
+                                        >
+                                          {skillMutationId === skill.id ? "Saving..." : "Save note"}
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            setEditingSkillId(null);
+                                            setEditingSkillDescription("");
+                                          }}
+                                          className="bg-slate-100 text-slate-700 text-caption font-semibold px-3 py-2 rounded-[8px] hover:bg-slate-200 transition-all"
+                                        >
+                                          Cancel
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <>
+                                      <p className="mt-2 text-body-sm text-slate-500">
+                                        {skill.description?.trim() || "No description added"}
+                                      </p>
+                                      <div className="flex items-center gap-2 mt-3">
+                                        <button
+                                          onClick={() => {
+                                            setEditingSkillId(skill.id);
+                                            setEditingSkillDescription(skill.description || "");
+                                          }}
+                                          className="text-caption font-semibold text-brand hover:opacity-80"
+                                        >
+                                          Edit description
+                                        </button>
+                                        {skill.endorsements ? (
+                                          <span className="text-caption text-slate-500">{skill.endorsements} endorsements</span>
+                                        ) : null}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteSkill(skill.id)}
+                                  disabled={skillMutationId === skill.id}
+                                  aria-label={`Delete ${skill.name} skill`}
+                                  aria-busy={skillMutationId === skill.id}
+                                  className="text-[#EF4444] hover:bg-[#FEE2E2] p-2 rounded-[8px] transition-colors flex-shrink-0"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-center py-12 bg-slate-50 rounded-card border border-slate-200">
+                          <p className="text-body text-slate-500 mb-2">No skills added yet</p>
+                          <p className="text-caption text-[#94A3B8]">Add your skills above to showcase your expertise</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {accountTab === "resume" && !isEmployerRole && (
+                    <div
+                      id="settings-account-panel-resume"
+                      role="tabpanel"
+                      aria-labelledby="settings-account-tab-resume"
+                    >
+                      <WorkerResumeSection initialResumeUrl={resumeUrl} />
+                    </div>
+                  )}
+                </div>
+          )}
+
+          {activeTab === "privacy" && (
+            <div
+              id="settings-main-panel-privacy"
+              role="tabpanel"
+              aria-labelledby="settings-main-tab-privacy"
+              className="p-6"
+            >
+              <div className="mb-6 border-b border-slate-200">
+                <SettingsTabList
+                  ariaLabel={tWorker("settings.privacyTabs.aria")}
+                  idPrefix="settings-privacy"
+                  options={visiblePrivacyTabs}
+                  value={privacyTab}
+                  onChange={handlePrivacyTabChange}
+                  variant="underline"
+                />
+              </div>
+
+              {privacyTab === "security" && (
+                <div
+                  id="settings-privacy-panel-security"
+                  role="tabpanel"
+                  aria-labelledby="settings-privacy-tab-security"
+                  className="space-y-6"
+                >
+                <Card>
+                  <div className="mb-6">
+                    <h2 className="text-section font-semibold text-slate-900">Change Password</h2>
+                    <p className="text-body-sm text-slate-500">
+                      Changing your password will revoke your other active sessions and keep this one signed in.
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label htmlFor="settings-current-password" className="text-body-sm text-slate-500">Current Password</label>
+                      <div className="relative">
+                        <input
+                          id="settings-current-password"
+                          type={showCurrentPassword ? "text" : "password"}
+                          autoComplete="current-password"
+                          value={securityData.currentPassword}
+                          onChange={(e) => setSecurityData({ ...securityData, currentPassword: e.target.value })}
+                          className="w-full mt-2 bg-white border border-slate-200 rounded-xl px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                          aria-label={showCurrentPassword ? "Hide current password" : "Show current password"}
+                          aria-pressed={showCurrentPassword}
+                          className="absolute right-4 top-1/2 -translate-y-1/2 text-[#94A3B8]"
+                        >
+                          {showCurrentPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-control border border-slate-200 bg-slate-50 p-3 text-caption text-slate-600">
+                      {isAdminRole
+                        ? secondaryEmail?.verified
+                          ? tAdmin("secondaryEmail.passwordDestination", { email: secondaryEmail.email })
+                          : tAdmin("secondaryEmail.required")
+                        : "Request OTP first. You will need the OTP from your email before setting a new password."}
+                      {isAdminRole && !secondaryEmail?.verified && <button type="button" className="block mt-2 font-semibold text-brand underline" onClick={() => handleAccountTabChange("personal")}>{tAdmin("secondaryEmail.setup")}</button>}
+                    </div>
+
+                    <div>
+                      <button
+                        onClick={handleRequestPasswordOtp}
+                        disabled={isOtpSending || (isAdminRole && !secondaryEmail?.verified)}
+                        className="px-5 py-2.5 bg-[#0F766E] text-white rounded-full text-body-sm font-semibold disabled:opacity-60"
+                      >
+                        {isOtpSending ? "Sending OTP..." : passwordOtpRequested ? "Resend OTP" : "Send OTP"}
+                      </button>
+                    </div>
+
+                    <div>
+                      <label htmlFor="settings-password-otp" className="text-body-sm text-slate-500">OTP Code</label>
+                      <input
+                        id="settings-password-otp"
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        aria-label="Password change verification code"
+                        value={passwordOtp}
+                        onChange={(e) => setPasswordOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                        placeholder="Enter 6-digit OTP"
+                        className="w-full mt-2 bg-white border border-slate-200 rounded-xl px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label htmlFor="settings-new-password" className="text-body-sm text-slate-500">New Password</label>
+                        <div className="relative">
+                          <input
+                            id="settings-new-password"
+                            type={showNewPassword ? "text" : "password"}
+                            autoComplete="new-password"
+                            value={securityData.newPassword}
+                            onChange={(e) => setSecurityData({ ...securityData, newPassword: e.target.value })}
+                            className="w-full mt-2 bg-white border border-slate-200 rounded-xl px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowNewPassword(!showNewPassword)}
+                            aria-label={showNewPassword ? "Hide new password" : "Show new password"}
+                            aria-pressed={showNewPassword}
+                            className="absolute right-4 top-1/2 -translate-y-1/2 text-[#94A3B8]"
+                          >
+                            {showNewPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label htmlFor="settings-confirm-password" className="text-body-sm text-slate-500">Confirm Password</label>
+                        <div className="relative">
+                          <input
+                            id="settings-confirm-password"
+                            type={showConfirmPassword ? "text" : "password"}
+                            autoComplete="new-password"
+                            value={securityData.confirmPassword}
+                            onChange={(e) => setSecurityData({ ...securityData, confirmPassword: e.target.value })}
+                            className="w-full mt-2 bg-white border border-slate-200 rounded-xl px-4 py-3 text-body outline-none focus:ring-2 focus:ring-brand"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                            aria-label={showConfirmPassword ? "Hide confirmed password" : "Show confirmed password"}
+                            aria-pressed={showConfirmPassword}
+                            className="absolute right-4 top-1/2 -translate-y-1/2 text-[#94A3B8]"
+                          >
+                            {showConfirmPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-4 mt-6">
+                    <button
+                      onClick={handleDiscardPassword}
+                      className="px-6 py-2.5 border border-slate-200 text-slate-500 rounded-full text-body"
+                    >
+                      Discard
+                    </button>
+                    <button
+                      onClick={handleChangePassword}
+                      disabled={isPasswordSubmitting || (isAdminRole && !secondaryEmail?.verified)}
+                      className="px-6 py-2.5 bg-brand text-white rounded-full text-body font-semibold disabled:opacity-60"
+                    >
+                      {isPasswordSubmitting ? "Saving..." : "Save New Password"}
+                    </button>
+                  </div>
+                </Card>
+
+                <MfaSettingsCard />
+
+                <Card>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-section font-semibold text-slate-900">Active Sessions</h3>
+                    {sessions.length > 0 && (
+                      <button
+                        onClick={handleRevokeAllSessions}
+                        className="text-[#EF4444] hover:bg-[#FEE2E2] px-4 py-2 rounded-[8px] text-body-sm font-medium transition-colors"
+                      >
+                        Sign out all sessions
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-body-sm text-slate-500 mb-4">
+                    See your currently logged in sessions and remove unrecognized ones.
+                  </p>
+                  <div className="space-y-4">
+                    {isLoadingSessions ? (
+                      <p className="text-body-sm text-slate-500">Loading sessions...</p>
+                    ) : sessions.length === 0 ? (
+                      <p className="text-body-sm text-slate-500">No active sessions found.</p>
+                    ) : (
+                      sessions.map((session, index) => (
+                        <div key={session.id} className="border border-slate-200 rounded-xl p-4">
+                          <div className="flex items-start justify-between mb-3">
+                            <p className="text-body-sm font-semibold text-slate-900">Session {index + 1}</p>
+                            {!session.current && (
+                              <button
+                                onClick={() => handleRevokeSession(session.id)}
+                                className="text-[#EF4444] hover:bg-[#FEE2E2] px-3 py-1 rounded-[8px] text-caption font-medium transition-colors"
+                              >
+                                Revoke
+                              </button>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <p className="text-caption text-slate-500">Current Session?</p>
+                              <p className="text-body font-semibold text-slate-900">{session.current ? "Yes" : "No"}</p>
+                            </div>
+                            <div>
+                              <p className="text-caption text-slate-500">Device Details</p>
+                              <p className="text-body font-semibold text-slate-900">{session.device}</p>
+                            </div>
+                            <div>
+                              <p className="text-caption text-slate-500">IP Address</p>
+                              <p className="text-body font-semibold text-slate-900">{session.ip}</p>
+                            </div>
+                            <div>
+                              <p className="text-caption text-slate-500">Location</p>
+                              <p className="text-body font-semibold text-slate-900">{session.location}</p>
+                            </div>
+                            <div>
+                              <p className="text-caption text-slate-500">Last activity</p>
+                              <p className="text-body font-semibold text-slate-900">{session.lastActive}</p>
+                            </div>
+                            <div className="flex items-end">
+                              <span
+                                className={`px-3 py-1 rounded-full text-caption font-semibold ${
+                                  session.current ? "bg-[#DCFCE7] text-[#166534]" : "bg-slate-200 text-slate-600"
+                                }`}
+                              >
+                                {session.current ? "Current session" : "Signed in"}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </Card>
+
+                <Card>
+                  <h3 className="text-section font-semibold text-slate-900 mb-2">Trusted Devices</h3>
+                  <p className="text-body-sm text-slate-500 mb-4">
+                    Devices you chose to trust skip the email code on sign-in for 30 days. Revoke any you don't recognize.
+                  </p>
+                  <div className="space-y-4">
+                    {isLoadingTrustedDevices ? (
+                      <p className="text-body-sm text-slate-500">Loading trusted devices...</p>
+                    ) : trustedDevices.length === 0 ? (
+                      <p className="text-body-sm text-slate-500">No trusted devices.</p>
+                    ) : (
+                      trustedDevices.map((device, index) => (
+                        <div key={device.id} className="border border-slate-200 rounded-xl p-4">
+                          <div className="flex items-start justify-between mb-3">
+                            <p className="text-body-sm font-semibold text-slate-900">Device {index + 1}</p>
+                            <button
+                              onClick={() => handleRevokeTrustedDevice(device.id)}
+                              className="text-[#EF4444] hover:bg-[#FEE2E2] px-3 py-1 rounded-[8px] text-caption font-medium transition-colors"
+                            >
+                              Revoke
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <p className="text-caption text-slate-500">Device Details</p>
+                              <p className="text-body font-semibold text-slate-900">{device.device}</p>
+                            </div>
+                            <div>
+                              <p className="text-caption text-slate-500">Trusted since</p>
+                              <p className="text-body font-semibold text-slate-900">{device.createdAt}</p>
+                            </div>
+                            <div>
+                              <p className="text-caption text-slate-500">Last used</p>
+                              <p className="text-body font-semibold text-slate-900">{device.lastActive}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </Card>
+                </div>
+              )}
+
+              {privacyTab === "verification" && !isAdminRole && (
+                <div
+                  id="settings-privacy-panel-verification"
+                  role="tabpanel"
+                  aria-labelledby="settings-privacy-tab-verification"
+                >
+                <Card>
+                  <h3 className="text-section font-semibold text-slate-900">Verification</h3>
+
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm text-slate-500">Verification status</p>
+                        <h4 className="text-lg font-semibold text-slate-900">
+                          {isProfileVerified ? "Profile verified" : "Verification incomplete"}
+                        </h4>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {isProfileVerified
+                            ? "All requirements completed."
+                            : "Complete the remaining requirements below."}
+                        </p>
+                      </div>
+                      {/* Was hardcoded success-green, so a brand-new user saw "0% complete" in green. */}
+                      <span
+                        className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${
+                          isProfileVerified
+                            ? "bg-[#DCFCE7] text-[#166534]"
+                            : verificationCompletionPercent > 0
+                              ? "bg-[#FEF3C7] text-[#92400E]"
+                              : "bg-slate-100 text-slate-600"
+                        }`}
+                      >
+                        {verificationCompletionPercent}% complete
+                      </span>
+                    </div>
+                    <div className="mt-3">
+                      <div
+                        className="h-2 w-full overflow-hidden rounded-full bg-slate-200"
+                        role="progressbar"
+                        aria-label="Profile verification progress"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={verificationCompletionPercent}
+                        aria-valuetext={`${completedSteps} of ${verificationStepsData.length} steps completed`}
+                      >
+                        <div
+                          className={`h-full transition-[width] duration-300 motion-reduce:transition-none ${
+                            isProfileVerified ? "bg-[#22C55E]" : "bg-brand"
+                          }`}
+                          style={{ width: `${verificationCompletionPercent}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">
+                        {completedSteps} of {verificationStepsData.length} steps completed
+                      </p>
+                    </div>
+                  </div>
+
+                  {isLoadingVerification ? (
+                    <div className="mt-5 space-y-5" aria-hidden="true">
+                      {[0, 1].map((groupIndex) => (
+                        <div key={`verif-skeleton-${groupIndex}`}>
+                          <div className="h-3 w-32 rounded bg-slate-100" />
+                          <div className="mt-2 divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200">
+                            {[0, 1].map((rowIndex) => (
+                              <div key={rowIndex} className="flex items-center gap-3 p-4">
+                                <div className="h-9 w-9 shrink-0 rounded-full bg-slate-100" />
+                                <div className="min-w-0 flex-1 space-y-2">
+                                  <div className="h-3.5 w-32 rounded bg-slate-100" />
+                                  <div className="h-3 w-full max-w-xs rounded bg-slate-100" />
+                                </div>
+                                <div className="h-6 w-20 shrink-0 rounded-full bg-slate-100" />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <>
+                      <p className="sr-only" role="status" aria-live="polite">
+                        {completedSteps} of {verificationStepsData.length} verification steps completed
+                      </p>
+                      <div className="mt-5 space-y-5">
+                        {groupVerificationSteps(verificationStepsData).map((group) => {
+                          const groupDone = group.steps.filter((step) => step.status === "complete").length;
+                          return (
+                            <section key={group.key} aria-label={group.label}>
+                              <div className="flex items-baseline justify-between gap-3">
+                                <h4 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
+                                  {group.label}
+                                </h4>
+                                <span className="shrink-0 text-xs text-slate-500">
+                                  {groupDone} of {group.steps.length}
+                                </span>
+                              </div>
+
+                              <div className="mt-2 divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200">
+                                {group.steps.map((step) => {
+                                  const meta =
+                                    verificationStatusMeta[step.status] || verificationStatusMeta.pending;
+                                  const StatusIcon = meta.Icon;
+                                  const needsAction =
+                                    step.status === "pending" || step.status === "rejected";
+                                  return (
+                                    <div key={step.id} className="p-4">
+                                      <div className="flex items-start gap-3">
+                                        <span
+                                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${meta.iconBg}`}
+                                          aria-hidden="true"
+                                        >
+                                          <StatusIcon className={`h-5 w-5 ${meta.iconColor}`} />
+                                        </span>
+
+                                        {/* min-w-0 is what lets a long "Rejected: <reason>" wrap instead
+                                            of blowing the row out. */}
+                                        <div className="min-w-0 flex-1">
+                                          <p className="text-[15px] font-semibold text-slate-900">{step.title}</p>
+                                          <p className="mt-1 text-body-sm text-slate-500">{step.description}</p>
+
+                                          {step.id === "email" && needsAction && (
+                                            <button
+                                              type="button"
+                                              onClick={() => navigate(ROUTES.emailVerification)}
+                                              className={verificationActionClass}
+                                            >
+                                              Verify email
+                                            </button>
+                                          )}
+
+                                          {step.id === "phone" && !isCurrentPhoneVerified && (
+                                            phoneHasUnsavedChanges ? (
+                                              <p className="mt-2 text-caption text-slate-500">Save your phone changes before requesting a verification code.</p>
+                                            ) : personalInfo.phone.trim() ? (
+                                              <div className="mt-3 space-y-2">
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                  <button
+                                                    type="button"
+                                                    onClick={handleRequestPhoneCode}
+                                                    disabled={isSendingPhoneCode}
+                                                    className={verificationActionClass}
+                                                  >
+                                                    {isSendingPhoneCode
+                                                      ? "Sending..."
+                                                      : phoneCodeRequested
+                                                        ? "Resend code"
+                                                        : "Send verification code"}
+                                                  </button>
+                                                  {phoneCodeHint && (
+                                                    <span className="text-xs text-slate-600">{phoneCodeHint}</span>
+                                                  )}
+                                                </div>
+                                                {phoneCodeRequested && (
+                                                  <div className="flex flex-wrap items-center gap-2">
+                                                    <input
+                                                      type="text"
+                                                      inputMode="numeric"
+                                                      autoComplete="one-time-code"
+                                                      aria-label="Phone verification code"
+                                                      maxLength={6}
+                                                      value={phoneVerificationCode}
+                                                      onChange={(event) =>
+                                                        setPhoneVerificationCode(
+                                                          event.target.value.replace(/[^\d]/g, "").slice(0, 6)
+                                                        )
+                                                      }
+                                                      placeholder="Enter 6-digit code"
+                                                      className="h-11 w-[180px] rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 outline-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand"
+                                                    />
+                                                    <button
+                                                      type="button"
+                                                      onClick={handleConfirmPhoneCode}
+                                                      disabled={isConfirmingPhoneCode || phoneVerificationCode.length !== 6}
+                                                      className={verificationSecondaryActionClass}
+                                                    >
+                                                      {isConfirmingPhoneCode ? "Verifying..." : "Confirm code"}
+                                                    </button>
+                                                  </div>
+                                                )}
+                                              </div>
+                                            ) : (
+                                              <p className="mt-2 text-caption text-slate-500">Save your phone number first to verify it.</p>
+                                            )
+                                          )}
+
+                                          {step.id === "identity" && needsAction && (
+                                            <button
+                                              type="button"
+                                              onClick={() => setIsIdWizardOpen(true)}
+                                              className={verificationActionClass}
+                                            >
+                                              {step.status === "rejected" ? "Re-verify ID" : "Verify ID"}
+                                            </button>
+                                          )}
+
+                                          {step.id === "address" && needsAction && (
+                                            <>
+                                              {/* Was a bare <label>, so it took no keyboard focus and
+                                                  showed no busy state. The input stays hidden; a real
+                                                  button drives it. */}
+                                              <button
+                                                type="button"
+                                                onClick={() => addressDocumentInputRef.current?.click()}
+                                                disabled={isUploadingAddressDocument}
+                                                className={verificationActionClass}
+                                              >
+                                                {isUploadingAddressDocument
+                                                  ? "Uploading..."
+                                                  : step.status === "rejected"
+                                                    ? "Upload replacement"
+                                                    : "Upload document"}
+                                              </button>
+                                              <input
+                                                ref={addressDocumentInputRef}
+                                                type="file"
+                                                accept="image/*,.pdf"
+                                                onChange={handleUploadAddressDocument}
+                                                className="hidden"
+                                                tabIndex={-1}
+                                                aria-hidden="true"
+                                              />
+                                            </>
+                                          )}
+                                        </div>
+
+                                        <span
+                                          className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ${meta.badge}`}
+                                        >
+                                          {meta.label}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </section>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+
+                  {/* The ID wizard used to render inline, ~400px tall, inside a row whose siblings
+                      were two lines of text. Nothing in the list could line up. */}
+                  <Dialog
+                    open={isIdWizardOpen}
+                    title="Verify your government ID"
+                    description="Scan a valid Philippine government ID to confirm your identity."
+                    onClose={() => setIsIdWizardOpen(false)}
+                  >
+                    <IdAnalyzerVerifier
+                      profileId={import.meta.env.VITE_KYC_PROFILE_ID}
+                      onComplete={async () => {
+                        await reloadVerificationStatus();
+                        setIsIdWizardOpen(false);
+                      }}
+                    />
+                  </Dialog>
+                </Card>
+                </div>
+              )}
+
+              {privacyTab === "privacy" && (
+                <div
+                  id="settings-privacy-panel-privacy"
+                  role="tabpanel"
+                  aria-labelledby="settings-privacy-tab-privacy"
+                  className="space-y-6"
+                >
+                  {hasEmployerAccess && <EmployerPrivacyCard initialValue={hideHiredCandidates} />}
+
+                  <DeleteAccountCard />
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "payments" && hasEmployerAccess && (
+            <div
+              id="settings-main-panel-payments"
+              role="tabpanel"
+              aria-labelledby="settings-main-tab-payments"
+              className="p-6"
+            >
+              <EmployerPaymentMethodsSection />
+            </div>
+          )}
+
+      </div>
+      <ConfirmDialog
+        open={Boolean(deleteExperienceTarget)}
+        title="Remove work experience"
+        description={`Remove ${deleteExperienceTarget?.title || "this role"} from your profile?`}
+        confirmLabel="Remove experience"
+        destructive
+        pending={Boolean(deletingExperienceId)}
+        onClose={() => setDeleteExperienceTarget(null)}
+        onConfirm={() => deleteExperienceTarget && handleDeleteExperience(deleteExperienceTarget.id)}
+      />
+      <ConfirmDialog
+        open={Boolean(deleteInternshipTarget)}
+        title="Remove internship"
+        description={`Remove ${deleteInternshipTarget?.title || "this internship"} from your profile?`}
+        confirmLabel="Remove internship"
+        destructive
+        pending={Boolean(deletingInternshipId)}
+        onClose={() => setDeleteInternshipTarget(null)}
+        onConfirm={() => deleteInternshipTarget && handleDeleteInternship(deleteInternshipTarget.id)}
+      />
+      <ConfirmDialog
+        open={Boolean(deleteCertificateTarget)}
+        title="Remove certificate"
+        description={`Remove ${deleteCertificateTarget?.name || "this certificate"} from your profile?`}
+        confirmLabel="Remove certificate"
+        destructive
+        pending={Boolean(deletingCertificateId)}
+        onClose={() => setDeleteCertificateTarget(null)}
+        onConfirm={() => deleteCertificateTarget && handleDeleteCertificate(deleteCertificateTarget.id)}
+      />
+      <Dialog
+        open={Boolean(avatarFileToEdit)}
+        title="Edit profile photo"
+        description="Crop, zoom, reposition, and rotate your photo before saving."
+        onClose={() => !isAvatarSubmitting && setAvatarFileToEdit(null)}
+        closeDisabled={isAvatarSubmitting}
+        size="md"
+      >
+        {avatarFileToEdit ? (
+          <ProfilePhotoEditor
+            file={avatarFileToEdit}
+            saving={isAvatarSubmitting}
+            onCancel={() => setAvatarFileToEdit(null)}
+            onSave={handleEditedPhotoSave}
+          />
+        ) : null}
+      </Dialog>
+    </div>
+  );
+}

@@ -1,0 +1,35 @@
+import { AdminGate } from "./admin/AdminGate";
+import { AnalyticsOverview } from "./AnalyticsOverview";
+import { useAdminData } from "../../hooks/useAdminData";
+
+function AdminAnalyticsContent() {
+  const { isLoading, loadError, jobs, users, transactions, stats, formatCurrency } = useAdminData();
+
+  return (
+    <div className="max-w-[1341px] mx-auto space-y-6">
+      {loadError && (
+        <div className="bg-[#FEE2E2] text-[#991B1B] border border-[#FECACA] px-4 py-3 rounded-xl text-body-sm">
+          {loadError}
+        </div>
+      )}
+
+      <AnalyticsOverview
+        isLoading={isLoading}
+        jobs={jobs}
+        users={users}
+        transactions={transactions}
+        totalUsers={stats.totalUsers}
+        uniqueApplicants={stats.uniqueApplicants}
+        formatCurrency={formatCurrency}
+      />
+    </div>
+  );
+}
+
+export function AdminAnalytics() {
+  return (
+    <AdminGate permission="analytics.view">
+      <AdminAnalyticsContent />
+    </AdminGate>
+  );
+}
