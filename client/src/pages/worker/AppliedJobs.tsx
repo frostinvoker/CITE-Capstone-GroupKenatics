@@ -1,0 +1,526 @@
+import { WorkTimeSummary } from '../../components/WorkTimeSummary';
+import { WorkSubmission } from '../../components/WorkSubmission';
+import { AssignmentPanel } from '../../components/AssignmentPanel';
+import { OfferResponseDeadline } from '../../components/OfferResponseDeadline';
+import { offerResponseStatus } from '../../lib/offerResponse';
+import { useOfferExpiry } from '../../hooks/useOfferExpiry';
+import React, { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { BriefcaseBusiness, CalendarDays, MapPin, Star } from "lucide-react";
+import { jobsAPI } from "../../services/jobs";
+import { getEligibleReviews, openPaymentDispute, type ApplicationStatus, type JobOffer, type ReviewEligibilityItem } from "../../services/api";
+import { ROUTES } from "../../utils/routes";
+import { RatingDialog, type RatingTarget } from "../../components/reviews/RatingDialog";
+import { ConfirmDialog, Dialog } from "../../components/ui/index";
+import { toast } from "../../lib/toast";
+import { formatCurrency, formatDate } from "../../lib/formatters";
+
+interface JobData {
+  _id: string;
+  title: string;
+  location: string;
+  salary: string;
+  jobType: string;
+  paymentMode?: string;
+  workStartTime?: string | null;
+  workEndTime?: string | null;
+  description: string;
+  deadline?: string;
+  status?: string;
+  jobPoster?: { firstName?: string; lastName?: string; companyName?: string };
+}
+
+interface Application {
+  _id: string;
+  status: ApplicationStatus;
+  appliedDate: string;
+  createdAt?: string;
+  job: JobData;
+  offer?: JobOffer | null;
+  workStatus?: string;
+  paymentStatus?: string;
+  agreedAmount?: number;
+}
+
+const FILTER_OPTIONS: Array<"All" | ApplicationStatus> = [
+  "All",
+  "Applied",
+  "Shortlisted",
+  "Interview Scheduled",
+  "Interviewed",
+  "Offer Sent",
+  "Hired",
+  "Rejected",
+  "Withdrawn",
+];
+
+const STATUS_LABEL_KEYS: Record<"All" | ApplicationStatus, string> = {
+  All: "all",
+  Applied: "applied",
+  Shortlisted: "shortlisted",
+  "Interview Scheduled": "interviewScheduled",
+  Interviewed: "interviewed",
+  "Offer Sent": "offerSent",
+  Hired: "hired",
+  Rejected: "rejected",
+  Withdrawn: "withdrawn",
+  Cancelled: "cancelled",
+  "Position filled": "positionFilled",
+};
+
+const getStatusLabel = (t: TFunction, status: "All" | ApplicationStatus) =>
+  t(`appliedJobs.statusLabels.${STATUS_LABEL_KEYS[status]}`);
+
+const formatMinimumPay = (t: TFunction, value?: string, paymentMode?: string) => {
+  const amount = Number(String(value || "").replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(amount) || amount <= 0) return value || t("appliedJobs.card.payFallback");
+  if (paymentMode === 'daily') return t('lifecycle.dailyRate', { ns: 'common', amount: amount.toLocaleString('en-PH') });
+  return t("appliedJobs.card.minimumPay", { amount: formatCurrency(amount, { maximumFractionDigits: 0 }) });
+};
+
+const AppliedJobs: React.FC = () => {
+  const { t } = useTranslation("worker");
+  const { t: tc } = useTranslation("common");
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedApplicationId = searchParams.get('applicationId');
+  const requestedStatus = searchParams.get("status") || "All";
+  const initialFilter = FILTER_OPTIONS.includes(requestedStatus as "All" | ApplicationStatus)
+    ? requestedStatus as "All" | ApplicationStatus
+    : "All";
+  const [selectedFilter, setSelectedFilter] = useState<"All" | ApplicationStatus>(initialFilter);
+  const [applications, setApplications] = useState<Application[]>([]);
+  useOfferExpiry(applications.map((application) => application.offer));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reviewEligibility, setReviewEligibility] = useState<Record<string, ReviewEligibilityItem>>({});
+  const [ratingTarget, setRatingTarget] = useState<RatingTarget | null>(null);
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  const [disputeTarget, setDisputeTarget] = useState<Application | null>(null);
+  const [disputeReason, setDisputeReason] = useState("");
+  const [disputeError, setDisputeError] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string;
+    description: string;
+    confirmLabel?: string;
+    destructive?: boolean;
+    run: () => Promise<void>;
+  } | null>(null);
+
+  const loadReviewEligibility = async () => {
+    try {
+      const response = await getEligibleReviews();
+      setReviewEligibility(Object.fromEntries((response?.asWorker || []).map((item) => [item.applicationId, item])));
+    } catch {
+      setReviewEligibility({});
+    }
+  };
+
+  useEffect(() => { void loadReviewEligibility(); }, []);
+
+  useEffect(() => {
+    setSelectedFilter(initialFilter);
+  }, [initialFilter]);
+
+  const updateFilter = (filter: "All" | ApplicationStatus) => {
+    setSelectedFilter(filter);
+    const next = new URLSearchParams(searchParams);
+    if (filter === "All") next.delete("status");
+    else next.set("status", filter);
+    setSearchParams(next, { replace: true });
+  };
+
+  const fetchApplications = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const statusParam = selectedFilter === "All" ? undefined : selectedFilter;
+      const response = await jobsAPI.getUserApplications(statusParam);
+      setApplications(response.data || []);
+    } catch (err: any) {
+      setError(err?.response?.data?.message || t("appliedJobs.toast.loadFailed"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchApplications();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFilter, t]);
+
+  const runOfferAction = async (applicationId: string, action: () => Promise<unknown>, successMessage?: string) => {
+    setActionBusyId(applicationId);
+    try {
+      await action();
+      await fetchApplications();
+      if (successMessage) toast.success(successMessage);
+    } catch (error: any) {
+      toast.error(error?.message || t("appliedJobs.toast.offerActionFailed"));
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  const handleAcceptOffer = (application: Application) => {
+    if (!application.offer) return;
+    const offer = application.offer;
+    setConfirmAction({
+      title: t("appliedJobs.confirmAcceptOffer.title"),
+      description: `${t("appliedJobs.confirmAcceptOffer.description", { amount: formatCurrency(offer.amount) })} ${tc("lifecycle.terms")}`,
+      confirmLabel: t("appliedJobs.confirmAcceptOffer.confirm"),
+      run: () => runOfferAction(application._id, () => jobsAPI.respondToJobOffer(offer.id, "accept"), t("appliedJobs.toast.offerAccepted")),
+    });
+  };
+
+  const handleDeclineOffer = (application: Application) => {
+    if (!application.offer) return;
+    const offer = application.offer;
+    setConfirmAction({
+      title: t("appliedJobs.confirmDeclineOffer.title"),
+      description: t("appliedJobs.confirmDeclineOffer.description", { amount: formatCurrency(offer.amount) }),
+      destructive: true,
+      confirmLabel: t("appliedJobs.confirmDeclineOffer.confirm"),
+      run: () => runOfferAction(application._id, () => jobsAPI.respondToJobOffer(offer.id, "reject")),
+    });
+  };
+
+  const handleConfirmDialogConfirm = () => {
+    if (!confirmAction) return;
+    const action = confirmAction;
+    setConfirmAction(null);
+    void action.run();
+  };
+
+
+  const handleOpenDispute = (application: Application) => {
+    setDisputeTarget(application);
+    setDisputeReason("");
+    setDisputeError(null);
+  };
+
+  const handleSubmitDispute = async () => {
+    if (!disputeTarget) return;
+    const reason = disputeReason.trim();
+    if (!reason) {
+      setDisputeError(t("appliedJobs.paymentDispute.reasonRequired"));
+      return;
+    }
+    const target = disputeTarget;
+    setDisputeTarget(null);
+    await runOfferAction(
+      target._id,
+      () => openPaymentDispute(target._id, reason),
+      t("appliedJobs.paymentDispute.opened"),
+    );
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "Applied": return "bg-slate-100 text-slate-700";
+      case "Shortlisted": return "bg-brand-100 text-brand-700";
+      case "Interview Scheduled": return "bg-cyan-100 text-cyan-700";
+      case "Interviewed": return "bg-sky-100 text-sky-700";
+      case "Offer Sent": return "bg-[#EAF2FC] text-brand";
+      case "Hired": return "bg-green-100 text-green-700";
+      case "Rejected": return "bg-red-100 text-red-700";
+      case "Withdrawn": return "bg-gray-100 text-gray-600";
+      default: return "bg-gray-100 text-gray-700";
+    }
+  };
+
+  const filteredApplications = applications;
+  const emptyStateLabel =
+    selectedFilter === "All"
+      ? t("appliedJobs.emptyState.labelAll")
+      : t("appliedJobs.emptyState.labelFiltered", { stage: getStatusLabel(t, selectedFilter) });
+  const emptyStateTitle =
+    selectedFilter === "All"
+      ? t("appliedJobs.emptyState.titleAll")
+      : t("appliedJobs.emptyState.titleFiltered", { stage: getStatusLabel(t, selectedFilter) });
+  const emptyStateDescription =
+    selectedFilter === "All"
+      ? t("appliedJobs.emptyState.descriptionAll")
+      : t("appliedJobs.emptyState.descriptionFiltered", { stage: getStatusLabel(t, selectedFilter) });
+
+  return (
+    <div className="ui-page pb-16">
+      {requestedApplicationId && <AssignmentPanel key={requestedApplicationId} applicationId={requestedApplicationId} defaultOpen hideTrigger onChanged={() => void fetchApplications()} onClose={() => { const next = new URLSearchParams(searchParams); next.delete('applicationId'); setSearchParams(next, { replace: true }); }} />}
+      <div className="ui-page-header">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-brand">{t("appliedJobs.eyebrow")}</p>
+          <h1 className="ui-page-title mt-1">{t("appliedJobs.title")}</h1>
+          <p className="ui-page-subtitle">{t("appliedJobs.subtitle")}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => navigate(ROUTES.worker.findJobs)}
+          className="inline-flex h-11 items-center gap-2 rounded-xl bg-brand px-5 text-sm font-semibold text-white transition hover:opacity-90"
+        >
+          <BriefcaseBusiness className="h-4 w-4" />
+          {t("appliedJobs.findJobsButton")}
+        </button>
+      </div>
+
+      <div className="ui-card flex flex-col gap-3 rounded-card border-slate-200 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-base font-bold text-slate-900">
+            {loading ? t("appliedJobs.summary.loading") : t("appliedJobs.summary.count", { count: applications.length })}
+          </p>
+          <p className="mt-1 text-sm text-slate-500">{t("appliedJobs.summary.filterHint")}</p>
+        </div>
+        <label className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-slate-600">{t("appliedJobs.statusFieldLabel")}</span>
+          <select
+            value={selectedFilter}
+            onChange={(event) => updateFilter(event.target.value as "All" | ApplicationStatus)}
+            className="h-11 min-w-48 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-brand focus:ring-2 focus:ring-brand-100"
+          >
+            {FILTER_OPTIONS.map((filter) => <option key={filter} value={filter}>{getStatusLabel(t, filter)}</option>)}
+          </select>
+        </label>
+      </div>
+
+      <div>
+          {/* Job Cards */}
+          {loading && (
+            <div className="bg-white rounded-card p-8 shadow-sm text-center text-gray-600">
+              {t("appliedJobs.summary.loading")}
+            </div>
+          )}
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-card p-6 text-red-700 mb-6">
+              {error}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {filteredApplications.map((application) => (
+              <article
+                key={application._id}
+                className="rounded-card border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-[#B8CBE5] hover:shadow-md"
+              >
+                <div className="flex items-start gap-4">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-brand text-lg font-bold text-white">
+                    {application.job?.title?.charAt(0) || "J"}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <h2 className="truncate text-section font-bold text-slate-900">{application.job?.title || t("appliedJobs.card.unavailableJob")}</h2>
+                        <p className="mt-1 text-sm text-slate-500">
+                          {application.job?.jobPoster?.companyName ||
+                            `${application.job?.jobPoster?.firstName || ""} ${application.job?.jobPoster?.lastName || ""}`.trim() ||
+                            t("appliedJobs.card.employerFallback")}
+                        </p>
+                      </div>
+                      <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${getStatusColor(application.status)}`}>
+                        {getStatusLabel(t, application.status)}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-[#EAF2FC] px-3 py-1 text-xs font-semibold text-brand">
+                        {application.job?.jobType || t("appliedJobs.card.jobTypeFallback")}
+                      </span>
+                      <span className="text-sm font-bold text-emerald-700">
+                        {formatMinimumPay(t, application.job?.salary, application.job?.paymentMode)}
+                      </span>
+                      {application.job?.paymentMode === 'daily' && <WorkTimeSummary start={application.job.workStartTime} end={application.job.workEndTime} rate={application.job.salary} />}
+                    </div>
+
+                    <p className="mt-3 flex items-start gap-1.5 text-sm text-slate-500">
+                      <MapPin className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span className="line-clamp-1">{application.job?.location || t("appliedJobs.card.locationFallback")}</span>
+                    </p>
+
+                    <p className="mt-3 line-clamp-2 text-sm leading-6 text-slate-600">
+                      {application.job?.description || t("appliedJobs.card.descriptionFallback")}
+                    </p>
+
+                    {application.offer && <OfferResponseDeadline offer={application.offer} />}
+                    {application.status === "Offer Sent" && application.offer && offerResponseStatus(application.offer) === "pending" ? (
+                      <div className="mt-4 rounded-xl border border-[#B8CBE5] bg-[#EAF2FC] p-3">
+                        <p className="text-sm font-semibold text-brand">
+                          {t("appliedJobs.offerPanel.title", { amount: formatCurrency(application.offer.amount) })}
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            disabled={actionBusyId === application._id}
+                            onClick={() => handleAcceptOffer(application)}
+                            className="inline-flex h-10 items-center justify-center rounded-xl bg-brand px-4 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {t("appliedJobs.offerPanel.accept", { amount: formatCurrency(application.offer.amount) })}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={actionBusyId === application._id}
+                            onClick={() => handleDeclineOffer(application)}
+                            className="inline-flex h-10 items-center justify-center rounded-xl border border-red-200 px-4 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {t("appliedJobs.offerPanel.decline")}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {application.status === "Hired" && application.workStatus === "Submitted" && application.paymentStatus === "Disputed" ? (
+                      <div className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+                        <p>{t("appliedJobs.paymentDispute.onHold")}</p>
+                        <button
+                          type="button"
+                          onClick={() => navigate(ROUTES.worker.financialDisputes)}
+                          className="mt-2 font-semibold text-amber-950 underline underline-offset-2"
+                        >
+                          {t("appliedJobs.paymentDispute.viewExisting")}
+                        </button>
+                      </div>
+                    ) : null}
+
+                  </div>
+                </div>
+                    <div className="mt-5 flex min-w-0 flex-col gap-4 border-t border-slate-100 pt-4">
+                      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500">
+                        <span className="inline-flex items-center gap-1.5">
+                          <CalendarDays className="h-3.5 w-3.5" />
+                          {t("appliedJobs.card.appliedOn", { date: formatDate(application.appliedDate || application.createdAt || Date.now()) })}
+                        </span>
+                        {application.job?.deadline ? (
+                          <span className="inline-flex items-center gap-1.5">
+                            <CalendarDays className="h-3.5 w-3.5" />
+                            {t("appliedJobs.card.deadlineOn", { date: formatDate(application.job.deadline) })}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="overflow-x-auto">
+                      <div className="flex w-max min-w-full items-center justify-end gap-2 py-1">
+                      {reviewEligibility[application._id]?.canReview ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const poster = application.job?.jobPoster;
+                            setRatingTarget({
+                              applicationId: application._id,
+                              name: poster?.companyName || `${poster?.firstName || ""} ${poster?.lastName || ""}`.trim() || t("appliedJobs.card.employerFallback"),
+                              jobTitle: application.job?.title || t("appliedJobs.card.completedJobFallback"),
+                              roleLabel: "employer",
+                            });
+                          }}
+                          className="inline-flex h-10 items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 text-sm font-semibold text-amber-800 hover:bg-amber-100"
+                        >
+                          <Star className="h-4 w-4" /> {t("appliedJobs.card.rateEmployer")}
+                        </button>
+                      ) : reviewEligibility[application._id]?.existingReview ? (
+                        <span className="inline-flex items-center gap-1 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">
+                          <Star className="h-4 w-4 fill-emerald-600" /> {t("appliedJobs.card.reviewSubmitted")}
+                        </span>
+                      ) : null}
+                      {['Hired', 'Cancelled', 'Position filled'].includes(application.status) && <AssignmentPanel applicationId={application._id} onChanged={() => void fetchApplications()} />}
+                      {application.status === 'Hired' && !['Paid', 'Processing', 'Disputed', 'Refunded'].includes(application.paymentStatus || '') && ['In Progress', 'Changes Requested', 'Submitted'].includes(application.workStatus || 'In Progress') && <WorkSubmission applicationId={application._id} resubmission={application.workStatus === 'Submitted' || application.workStatus === 'Changes Requested'} onChanged={() => void fetchApplications()} />}
+                      {application.status === 'Hired' && application.workStatus === 'Submitted' && !['Paid', 'Disputed'].includes(application.paymentStatus || '') && <button type="button" disabled={actionBusyId === application._id} onClick={() => handleOpenDispute(application)} className="inline-flex min-h-11 shrink-0 items-center justify-center whitespace-nowrap rounded-xl border border-red-200 px-4 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">{t('appliedJobs.paymentDispute.openButton')}</button>}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(ROUTES.worker.jobDetails(application.job?._id), {
+                            state: { isApplied: true, status: application.status }
+                          });
+                        }}
+                        className="min-h-11 shrink-0 whitespace-nowrap rounded-xl bg-brand px-5 text-sm font-semibold text-white transition hover:opacity-90"
+                      >
+                        {t("appliedJobs.card.viewDetails")}
+                      </button>
+                      </div>
+                      </div>
+                    </div>
+              </article>
+            ))}
+          </div>
+
+          {/* Empty State */}
+          {!loading && filteredApplications.length === 0 && (
+            <div className="rounded-[20px] border border-[#E5E7EB] bg-white px-5 py-8 text-center shadow-sm sm:px-12 sm:py-12">
+              <div className="mx-auto flex max-w-2xl flex-col items-center text-center">
+                <div className="mb-4 inline-flex items-center rounded-full bg-[#F8FAFC] px-3 py-1 text-caption font-medium text-slate-500">
+                  {emptyStateLabel}
+                </div>
+
+                <h3 className="max-w-xl text-section sm:text-[28px] font-bold tracking-[-0.02em] text-[#111827] sm:text-[32px]">
+                  {emptyStateTitle}
+                </h3>
+
+                <p className="mt-3 max-w-xl text-[16px] leading-7 text-[#6B7280]">
+                  {emptyStateDescription}
+                </p>
+
+                <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
+                  <button
+                    onClick={() => navigate(ROUTES.worker.findJobs)}
+                    className="inline-flex items-center justify-center rounded-card bg-brand px-5 py-3 text-[15px] font-semibold text-white transition hover:opacity-90"
+                  >
+                    {t("appliedJobs.emptyState.browseJobs")}
+                  </button>
+
+                  {selectedFilter !== "All" ? (
+                    <button
+                      onClick={() => updateFilter("All")}
+                      className="inline-flex items-center gap-2 rounded-card border border-[#E5E7EB] bg-white px-5 py-3 text-[15px] font-semibold text-[#334155] transition hover:bg-[#F8FAFC]"
+                    >
+                      {t("appliedJobs.emptyState.showAll")}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          )}
+      </div>
+      {ratingTarget ? (
+        <RatingDialog target={ratingTarget} onClose={() => setRatingTarget(null)} onSubmitted={loadReviewEligibility} />
+      ) : null}
+      <Dialog
+        open={Boolean(disputeTarget)}
+        title={t("appliedJobs.paymentDispute.title")}
+        description={t("appliedJobs.paymentDispute.description", { subject: disputeTarget?.job.title || "" })}
+        onClose={() => setDisputeTarget(null)}
+      >
+        <div className="space-y-4">
+          <label className="block text-sm font-semibold text-slate-700">
+            {t("appliedJobs.paymentDispute.reasonLabel")}
+            <textarea
+              rows={4}
+              maxLength={2000}
+              value={disputeReason}
+              onChange={(event) => { setDisputeReason(event.target.value); setDisputeError(null); }}
+              className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
+            />
+            {disputeError ? <span className="mt-1 block text-xs text-red-700">{disputeError}</span> : null}
+          </label>
+          <p className="text-xs text-amber-800">{t("appliedJobs.paymentDispute.holdNotice")}</p>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setDisputeTarget(null)} className="min-h-11 rounded-xl border border-slate-300 px-4 text-sm font-semibold">
+              {t("appliedJobs.paymentDispute.cancel")}
+            </button>
+            <button type="button" disabled={!disputeReason.trim()} onClick={() => void handleSubmitDispute()} className="min-h-11 rounded-xl bg-red-700 px-4 text-sm font-semibold text-white disabled:opacity-60">
+              {t("appliedJobs.paymentDispute.submit")}
+            </button>
+          </div>
+        </div>
+      </Dialog>
+      <ConfirmDialog
+        open={Boolean(confirmAction)}
+        title={confirmAction?.title || ""}
+        description={confirmAction?.description || ""}
+        confirmLabel={confirmAction?.confirmLabel}
+        destructive={confirmAction?.destructive}
+        onConfirm={handleConfirmDialogConfirm}
+        onClose={() => setConfirmAction(null)}
+      />
+    </div>
+  );
+};
+
+export default AppliedJobs;

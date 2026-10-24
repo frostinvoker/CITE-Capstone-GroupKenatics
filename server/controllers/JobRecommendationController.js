@@ -1,0 +1,64 @@
+import Job from '../models/Job.js';
+import JobApplication from '../models/JobApplication.js';
+import User from '../models/User.js';
+import { proximityOf, serializePublicJob } from '../lib/jobDiscovery.js';
+import { scoreJobForWorker } from '../lib/jobMatching.js';
+import { availableJobFilter } from '../lib/lifecyclePolicy.js';
+
+const getUserId = (req) => req.user?.id || req.user?.userId || null;
+
+export async function getRecommendedJobs(req, res) {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ message: 'Authentication required.' });
+
+    const worker = await User.findById(userId)
+      .select('skills workExperience jobPreferences preferredCategories jobPosition about totalExperience city province')
+      .populate('preferredCategories', 'name');
+    if (!worker) return res.status(404).json({ message: 'Worker profile not found.' });
+
+    const applied = await JobApplication.find({ applicant: userId }).select('job').lean();
+    const excludedJobIds = applied.map((item) => item.job).filter(Boolean);
+    const limit = Math.max(1, Math.min(50, Number(req.query?.limit) || 12));
+    // National pool: recommendations rank on match quality, with the worker's
+    // own locality used as a tiebreaker below rather than as a hard filter.
+    const filter = {
+      ...availableJobFilter(),
+      jobPoster: { $ne: userId },
+      ...(excludedJobIds.length ? { _id: { $nin: excludedJobIds } } : {}),
+    };
+    const locality = {
+      city: String(worker.city || '').trim(),
+      province: String(worker.province || '').trim(),
+    };
+
+    // Scoring happens in memory below, so only a recency window is considered:
+    // the 100 newest candidates, not the whole corpus. A strong match older
+    // than that window cannot surface. That is a deliberate trade against
+    // scoring every open job on every request -- raising it is a performance
+    // decision that wants a benchmark, not an incidental change.
+    const jobs = await Job.find(filter)
+      .populate('category', 'name')
+      .populate('jobPoster', 'firstName lastName companyName avatarUrl verification')
+      .sort({ urgent: -1, createdAt: -1 })
+      .limit(100);
+
+    const recommendations = jobs
+      .map((job) => ({
+        ...serializePublicJob(job),
+        match: scoreJobForWorker(job, worker),
+        proximity: proximityOf(job, locality),
+      }))
+      .sort((left, right) =>
+        right.match.percentage - left.match.percentage ||
+        Number(Boolean(right.urgent)) - Number(Boolean(left.urgent)) ||
+        new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+      )
+      .slice(0, limit);
+
+    return res.status(200).json(recommendations);
+  } catch (error) {
+    console.error('Get recommended jobs error:', error);
+    return res.status(500).json({ message: 'Failed to load recommended jobs.' });
+  }
+}

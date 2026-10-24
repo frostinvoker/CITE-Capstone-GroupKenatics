@@ -1,0 +1,51 @@
+import { ROUTES, matchesPath, startsWithPath } from "../utils/routes";
+
+export type AccountMode = "worker" | "employer";
+
+export type RoleNavigationItem = {
+  id: string;
+  label: string;
+  path: string;
+  exactPaths?: string[];
+  nestedPaths?: string[];
+};
+
+// Workers have no dashboard, so Jobs is both the first tab and their home —
+// it absorbs the notifications route the old "home" tab used to highlight.
+export const workerBottomNavigation: RoleNavigationItem[] = [
+  {
+    id: "jobs",
+    label: "Jobs",
+    path: ROUTES.worker.findJobs,
+    exactPaths: [ROUTES.worker.appliedJobs, ROUTES.worker.savedJobs, ROUTES.worker.notifications],
+    nestedPaths: [ROUTES.worker.jobDetailsPattern.replace("/:jobId", "")],
+  },
+  { id: "wallet", label: "E-Wallet", path: ROUTES.worker.eWallet, exactPaths: [ROUTES.worker.financialDisputes] },
+  { id: "messages", label: "Messages", path: ROUTES.worker.messages },
+  { id: "profile", label: "Profile", path: ROUTES.worker.profile, exactPaths: [ROUTES.worker.settings, ROUTES.worker.support] },
+];
+
+export const employerBottomNavigation: RoleNavigationItem[] = [
+  { id: "home", label: "Home", path: ROUTES.employer.dashboard },
+  { id: "applications", label: "Applications", path: ROUTES.employer.applications },
+  { id: "post-job", label: "Post Job", path: ROUTES.employer.postJob, exactPaths: [ROUTES.employer.jobs, ROUTES.employer.jobHistory] },
+  { id: "messages", label: "Messages", path: ROUTES.employer.messages },
+  { id: "alerts", label: "Alerts", path: ROUTES.employer.notifications },
+  {
+    id: "profile",
+    label: "Profile",
+    path: ROUTES.employer.profile,
+    exactPaths: [ROUTES.employer.settings, ROUTES.employer.support, ROUTES.employer.eWallet, ROUTES.employer.financialDisputes],
+  },
+];
+
+export const navigationForMode = (mode: AccountMode) =>
+  mode === "employer" ? employerBottomNavigation : workerBottomNavigation;
+
+export const isNavigationItemActive = (pathname: string, item: RoleNavigationItem) =>
+  matchesPath(pathname, item.path) ||
+  Boolean(item.exactPaths?.some((candidate) => matchesPath(pathname, candidate))) ||
+  Boolean(item.nestedPaths?.some((candidate) => startsWithPath(pathname, candidate)));
+
+export const activeNavigationItem = (pathname: string, items: RoleNavigationItem[]) =>
+  items.find((item) => isNavigationItemActive(pathname, item));

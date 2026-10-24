@@ -1,0 +1,616 @@
+import mongoose from 'mongoose';
+import bcrypt from 'bcryptjs';
+import { MAX_FAILED_ATTEMPTS, getLockDurationMs, isLockActive } from '../lib/loginLockout.js';
+
+const UserSchema = new mongoose.Schema(
+  {
+    phoneNumber: {
+      type: String,
+      required: false,
+      unique: true,
+      sparse: true,
+      minlength: 11,
+      maxlength: 11,
+    },
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+    },
+    // Private staff password-change address; exposed only by the owner's security API.
+    secondaryEmail: { type: String, lowercase: true, trim: true, default: null, select: false },
+    secondaryEmailVerifiedAt: { type: Date, default: null, select: false },
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      select: false,
+    },
+    authProvider: {
+      type: String,
+      enum: ['password', 'google'],
+      default: 'password',
+    },
+    username: {
+      type: String,
+      required: false,
+      unique: true,
+      sparse: true,
+      lowercase: true,
+      trim: true,
+    },
+    firstName: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 30,
+    },
+    lastName: {
+      type: String,
+      required: true,
+      trim: true,
+      maxLength: 30,
+    },
+    role: {
+      type: String,
+      enum: ['hire', 'work', 'both', 'admin', 'superadmin'],
+      default: 'work',
+    },
+    // Sub-role for `role: 'admin'` staff accounts only — see server/lib/adminPermissions.js,
+    // which mirrors client/src/lib/adminPermissions.ts. Null for non-staff and for superadmin,
+    // which sits above the five staff roles and needs no sub-role.
+    staffRole: {
+      type: String,
+      enum: ['admin_team', 'moderator', 'finance_team', 'analytics_team', 'support_staff', null],
+      default: null,
+    },
+    blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    archivedConversations: [{ type: String }],
+    status: {
+      type: String,
+      enum: ['pending', 'active', 'disabled', 'banned', 'deleted'],
+      default: 'pending',
+      index: true,
+    },
+    bannedAt: {
+      type: Date,
+      default: null,
+    },
+    bannedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    banReason: {
+      type: String,
+      trim: true,
+      maxLength: 2000,
+      default: null,
+    },
+    suspiciousFlagged: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    suspiciousFlagReason: {
+      type: String,
+      trim: true,
+      maxLength: 1000,
+      default: null,
+    },
+    suspiciousFlaggedAt: {
+      type: Date,
+      default: null,
+    },
+    suspiciousFlaggedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
+    redactedAt: {
+      type: Date,
+      default: null,
+    },
+    mfaEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    mfaMethod: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    mfaSecret: {
+      type: String,
+      default: null,
+      select: false,
+    },
+    mfaPendingSecret: {
+      type: String,
+      default: null,
+      select: false,
+    },
+    mfaBackupCodes: {
+      type: [String],
+      default: [],
+      select: false,
+    },
+    employerBalance: {
+      type: Number,
+      default: 0,
+    },
+    workerBalance: {
+      type: Number,
+      default: 0,
+    },
+    hideHiredCandidates: {
+      type: Boolean,
+      default: true,
+    },
+    city: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+    },
+    province: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+    },
+    barangay: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+    },
+    addressType: {
+      type: String,
+      enum: ['home', 'office', 'place'],
+      default: 'home',
+      trim: true,
+    },
+    address: {
+      type: String,
+      trim: true,
+      maxlength: 300,
+    },
+    facebook: {
+      type: String,
+      trim: true,
+      maxlength: 300,
+    },
+    profilePhotoName: {
+      type: String,
+      trim: true,
+      maxlength: 255,
+    },
+    jobPosition: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+    },
+    companyName: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+    },
+    startDate: {
+      type: String,
+      trim: true,
+      maxlength: 40,
+    },
+    endDate: {
+      type: String,
+      trim: true,
+      maxlength: 40,
+    },
+    logoName: {
+      type: String,
+      trim: true,
+      maxlength: 255,
+    },
+    resumeFileName: {
+      type: String,
+      trim: true,
+      maxlength: 255,
+    },
+    resumeUrl: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+    },
+    avatarUrl: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+    },
+    about: {
+      type: String,
+      trim: true,
+      maxlength: 2000,
+    },
+    linkedin: {
+      type: String,
+      trim: true,
+      maxlength: 300,
+    },
+    website: {
+      type: String,
+      trim: true,
+      maxlength: 300,
+    },
+    totalExperience: {
+      type: String,
+      trim: true,
+      maxlength: 50,
+    },
+    projectsCompleted: {
+      type: Number,
+      default: 0,
+    },
+    jobsApplied: {
+      type: Number,
+      default: 0,
+    },
+    successRate: {
+      type: String,
+      trim: true,
+    },
+    skills: [
+      {
+        name: {
+          type: String,
+          trim: true,
+          required: true,
+          maxlength: 80,
+        },
+        description: {
+          type: String,
+          trim: true,
+          default: '',
+          maxlength: 500,
+        },
+        endorsements: {
+          type: Number,
+          default: 0,
+        },
+        createdAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    preferredCategories: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Category',
+    }],
+    jobPreferences: [{
+      type: String,
+      trim: true,
+      maxlength: 120,
+    }],
+    workExperience: [
+      {
+        title: {
+          type: String,
+          trim: true,
+          required: true,
+          maxlength: 100,
+        },
+        company: {
+          type: String,
+          trim: true,
+          required: true,
+          maxlength: 120,
+        },
+        location: {
+          type: String,
+          trim: true,
+          maxlength: 120,
+          default: '',
+        },
+        startDate: {
+          type: Date,
+          required: true,
+        },
+        endDate: {
+          type: Date,
+          default: null,
+        },
+        current: {
+          type: Boolean,
+          default: false,
+        },
+        description: {
+          type: String,
+          trim: true,
+          maxlength: 1000,
+          default: '',
+        },
+        // Work samples attached to this entry. `filename` is the StoredUpload
+        // key (uploads live in Mongo, not on disk -- see lib/uploadStore.js),
+        // and is what deletion uses to reclaim the blob.
+        media: [
+          {
+            url: {
+              type: String,
+              required: true,
+              trim: true,
+              maxlength: 500,
+            },
+            filename: {
+              type: String,
+              required: true,
+              trim: true,
+              maxlength: 255,
+            },
+            originalName: {
+              type: String,
+              trim: true,
+              maxlength: 255,
+            },
+            createdAt: {
+              type: Date,
+              default: Date.now,
+            },
+          },
+        ],
+        createdAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    // Professional credentials shown on the profile alongside workExperience.
+    // Deliberately carries no `media[]`: uploads go through lib/uploadStore.js and
+    // own a deletion/reclaim path, so a second media surface is its own piece of
+    // work rather than a field added here.
+    certificates: [
+      {
+        name: {
+          type: String,
+          trim: true,
+          required: true,
+          maxlength: 120,
+        },
+        issuer: {
+          type: String,
+          trim: true,
+          required: true,
+          maxlength: 120,
+        },
+        issueDate: {
+          type: Date,
+          required: true,
+        },
+        // Null means "does not expire", which is the common case for most
+        // certifications -- distinct from "expiry unknown".
+        expiryDate: {
+          type: Date,
+          default: null,
+        },
+        credentialId: {
+          type: String,
+          trim: true,
+          maxlength: 80,
+          default: '',
+        },
+        credentialUrl: {
+          type: String,
+          trim: true,
+          maxlength: 500,
+          default: '',
+        },
+        createdAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    // Same field set as workExperience minus `media` -- an internship is a work
+    // entry, so it reuses the proven shape instead of inventing a parallel one.
+    internships: [
+      {
+        title: {
+          type: String,
+          trim: true,
+          required: true,
+          maxlength: 100,
+        },
+        company: {
+          type: String,
+          trim: true,
+          required: true,
+          maxlength: 120,
+        },
+        location: {
+          type: String,
+          trim: true,
+          maxlength: 120,
+          default: '',
+        },
+        startDate: {
+          type: Date,
+          required: true,
+        },
+        endDate: {
+          type: Date,
+          default: null,
+        },
+        current: {
+          type: Boolean,
+          default: false,
+        },
+        description: {
+          type: String,
+          trim: true,
+          maxlength: 1000,
+          default: '',
+        },
+        createdAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    verification: {
+      emailVerified: {
+        type: Boolean,
+        default: false,
+      },
+      phoneVerified: {
+        type: Boolean,
+        default: false,
+      },
+      identityVerified: {
+        type: Boolean,
+        default: false,
+      },
+      addressVerified: {
+        type: Boolean,
+        default: false,
+      },
+      identityDocument: {
+        status: {
+          type: String,
+          enum: ['pending', 'in-review', 'complete', 'rejected'],
+          default: 'pending',
+        },
+        documentUrl: {
+          type: String,
+          trim: true,
+        },
+        uploadedAt: {
+          type: Date,
+        },
+        reviewedAt: {
+          type: Date,
+        },
+        reviewedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+        },
+        rejectionReason: {
+          type: String,
+          trim: true,
+          maxlength: 500,
+        },
+      },
+      addressDocument: {
+        status: {
+          type: String,
+          enum: ['pending', 'in-review', 'complete', 'rejected'],
+          default: 'pending',
+        },
+        documentUrl: {
+          type: String,
+          trim: true,
+        },
+        uploadedAt: {
+          type: Date,
+        },
+        reviewedAt: {
+          type: Date,
+        },
+        reviewedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+        },
+        rejectionReason: {
+          type: String,
+          trim: true,
+          maxlength: 500,
+        },
+      },
+    },
+    passwordHashed: {
+      type: String,
+      required: true,
+      select: false,
+    },
+    passwordChangeRequired: {
+      type: Boolean,
+      default: false,
+    },
+    // Failed-login lockout state -- see server/lib/loginLockout.js for the
+    // policy these three interpret. All are `select: false` so they never ride
+    // along into an API response through a read that omits .select().
+    failedLoginAttempts: {
+      type: Number,
+      default: 0,
+      select: false,
+    },
+    loginLockCount: {
+      type: Number,
+      default: 0,
+      select: false,
+    },
+    lockUntil: {
+      type: Date,
+      default: null,
+      select: false,
+    },
+  },
+  { timestamps: true, versionKey: false }
+);
+
+UserSchema.statics.hashPassword = async function hashPassword(password) {
+  return bcrypt.hash(password, 10);
+};
+
+UserSchema.methods.setPassword = async function setPassword(password) {
+  this.passwordHashed = await this.constructor.hashPassword(password);
+};
+
+UserSchema.methods.validatePassword = async function validatePassword(password) {
+  if (!this.passwordHashed) return false;
+  return bcrypt.compare(password, this.passwordHashed);
+};
+
+UserSchema.methods.isLoginLocked = function isLoginLocked() {
+  return isLockActive(this.lockUntil);
+};
+
+/**
+ * Records one failed attempt. On reaching the threshold it applies a lock whose
+ * length is fixed at three minutes,
+ * and resets the attempt counter so the next lock needs a fresh run of
+ * failures. Returns true when this call was the one that locked the account.
+ */
+UserSchema.methods.registerFailedLogin = async function registerFailedLogin() {
+  const now = new Date();
+  const count = { $add: [{ $ifNull: ['$failedLoginAttempts', 0] }, 1] };
+  const threshold = { $gte: [count, MAX_FAILED_ATTEMPTS] };
+  const updated = await this.constructor.findOneAndUpdate(
+    { _id: this._id, $or: [{ lockUntil: null }, { lockUntil: { $lte: now } }] },
+    [{ $set: {
+      failedLoginAttempts: { $cond: [threshold, 0, count] },
+      loginLockCount: { $cond: [threshold, { $add: [{ $ifNull: ['$loginLockCount', 0] }, 1] }, { $ifNull: ['$loginLockCount', 0] }] },
+      lockUntil: { $cond: [threshold, new Date(now.getTime() + getLockDurationMs()), null] },
+    } }], { updatePipeline: true, returnDocument: 'after' }
+  ).select('+failedLoginAttempts +loginLockCount +lockUntil');
+  if (updated) { this.failedLoginAttempts = updated.failedLoginAttempts; this.loginLockCount = updated.loginLockCount; this.lockUntil = updated.lockUntil; }
+  return Boolean(updated?.lockUntil);
+};
+
+/**
+ * Clears every lockout counter after a genuine sign-in, including the
+ * escalation count -- a user who proves they own the account should not carry
+ * a longer penalty into their next typo.
+ */
+UserSchema.methods.clearLoginLock = async function clearLoginLock() {
+  if (!this.failedLoginAttempts && !this.loginLockCount && !this.lockUntil) {
+    return;
+  }
+  this.failedLoginAttempts = 0;
+  this.loginLockCount = 0;
+  this.lockUntil = null;
+  await this.save();
+};
+
+export default mongoose.model('User', UserSchema);

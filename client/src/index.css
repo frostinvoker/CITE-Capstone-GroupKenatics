@@ -1,0 +1,271 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.page-transition {
+	/* Do not use transform or will-change here. Those properties create a
+	   containing/stacking context, trapping fixed dialogs behind the dashboard
+	   header or inside the content pane. */
+	animation: page-fade-in 220ms ease-out;
+}
+
+/* Keep the desktop dashboard rail fully visible on short laptop viewports.
+   The main content pane owns page scrolling; mobile drawers retain menu scrolling. */
+@media (min-width: 1024px) and (max-height: 800px) {
+	.dashboard-sidebar {
+		padding: 0.5rem 0.75rem !important;
+		--sidebar-padding-y: 0.5rem;
+	}
+
+	.dashboard-sidebar-header {
+		margin-bottom: 0.25rem;
+	}
+
+	.dashboard-sidebar-nav button {
+		min-height: 2.75rem;
+		padding-top: 0.625rem;
+		padding-bottom: 0.625rem;
+	}
+
+	.dashboard-sidebar-nav,
+	.dashboard-sidebar-nav > div {
+		row-gap: 0;
+	}
+
+	.dashboard-sidebar-nav > :not([hidden]) ~ :not([hidden]),
+	.dashboard-sidebar-nav > div > :not([hidden]) ~ :not([hidden]) {
+		margin-top: 0;
+	}
+
+	.dashboard-sidebar-nav > div:first-child {
+		padding-bottom: 0.125rem;
+	}
+
+	.dashboard-sidebar-nav > div:last-child {
+		padding-top: 0.125rem;
+		padding-bottom: 0.125rem;
+	}
+
+	.dashboard-sidebar-footer {
+		margin-top: 0.125rem;
+		padding-top: 0.25rem;
+	}
+}
+
+@keyframes page-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.page-transition {
+		animation: none;
+	}
+}
+
+@keyframes gradient-shift {
+	0%,
+	100% {
+		background-position: 0% 50%;
+	}
+	50% {
+		background-position: 100% 50%;
+	}
+}
+
+.animate-gradient {
+	animation: gradient-shift 4s ease infinite;
+}
+
+:root {
+	color-scheme: light;
+	--brand-primary: #1c4d8d;
+	--brand-primary-soft: rgb(28 77 141 / 0.08);
+	--brand-primary-muted: rgb(28 77 141 / 0.16);
+	--brand-primary-border: rgb(28 77 141 / 0.24);
+	--brand-focus-ring: rgb(28 77 141 / 0.34);
+	--app-font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+	--ui-title-size: clamp(1.875rem, 2.2vw, 2.25rem);
+	--ui-subtitle-size: 1rem;
+	--ui-control-height: 2.75rem;
+	--ui-control-font-size: 0.95rem;
+}
+
+@layer components {
+	.brand-primary {
+		background-color: var(--brand-primary);
+		color: white;
+	}
+
+	.brand-primary-interactive {
+		background-color: var(--brand-primary);
+		color: white;
+		transition: opacity 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+	}
+
+	.brand-primary-interactive:hover:not(:disabled) {
+		opacity: 0.92;
+	}
+
+	.brand-primary-interactive:active:not(:disabled) {
+		opacity: 0.84;
+		transform: translateY(1px);
+	}
+
+	.brand-primary-interactive:focus-visible {
+		outline: 3px solid var(--brand-focus-ring);
+		outline-offset: 2px;
+	}
+
+	.brand-primary-interactive:disabled {
+		cursor: not-allowed;
+		opacity: 0.5;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	font-family: var(--app-font-family);
+	background-color: #f8fafc;
+	color: #0f172a;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+	font: inherit;
+}
+
+#root {
+	min-height: 100vh;
+}
+
+@layer components {
+	.dashboard-scope {
+		font-family: var(--app-font-family);
+		width: 100%;
+		overflow-x: clip;
+	}
+
+	.dashboard-scope > * {
+		min-width: 0;
+	}
+
+	.dashboard-scope .ui-page {
+		@apply mx-auto max-w-[1341px] space-y-6;
+	}
+
+	.dashboard-scope .ui-page-header {
+		@apply flex flex-wrap items-start justify-between gap-4;
+	}
+
+	.dashboard-scope .ui-page-title {
+		font-size: var(--ui-title-size);
+		@apply font-bold tracking-tight text-[#0F2954] leading-tight;
+	}
+
+	.dashboard-scope .ui-page-subtitle {
+		font-size: var(--ui-subtitle-size);
+		@apply mt-1 text-slate-500;
+	}
+
+	.dashboard-scope .ui-card {
+		@apply rounded-2xl border border-slate-200 bg-white shadow-sm;
+	}
+
+	.dashboard-scope :where(
+		input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+		select
+	) {
+		min-height: var(--ui-control-height);
+		font-size: var(--ui-control-font-size);
+	}
+
+	.dashboard-scope textarea {
+		min-height: 6.25rem;
+		font-size: var(--ui-control-font-size);
+	}
+
+	.dashboard-scope label {
+		@apply text-sm font-semibold text-slate-700;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		scroll-behavior: auto !important;
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
+}
+
+@keyframes microjobs-logo-enter {
+	0% { transform: rotate(0deg) scale(0.82); opacity: 0; }
+	70% { transform: rotate(34deg) scale(1.05); opacity: 1; }
+	100% { transform: rotate(30deg) scale(1); opacity: 1; }
+}
+
+@keyframes microjobs-logo-spin {
+	0% { transform: rotate(30deg) scale(1); }
+	45% { transform: rotate(210deg) scale(0.85); }
+	100% { transform: rotate(390deg) scale(1); } /* 390deg is 30deg, so it lands without a snap-back */
+}
+
+@keyframes microjobs-wordmark-enter {
+	from { transform: translateY(6px); }
+	to { transform: translateY(0); }
+}
+
+.microjobs-logo-mark {
+	animation: microjobs-logo-enter 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+	transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+/* Tap-triggered flourish, toggled by MicroJobsLogo.tsx only where the logo is a button. */
+.microjobs-logo-mark.microjobs-logo-mark--spin {
+	animation: microjobs-logo-spin 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.microjobs-logo-wordmark {
+	animation: microjobs-wordmark-enter 240ms ease-out 80ms both;
+}
+
+button.microjobs-logo:hover .microjobs-logo-mark,
+button.microjobs-logo:focus-visible .microjobs-logo-mark {
+	transform: rotate(30deg) translateY(-1px) scale(1.04);
+	box-shadow: 0 8px 20px rgb(28 77 141 / 22%);
+}
+
+button.microjobs-logo:active .microjobs-logo-mark {
+	transform: rotate(30deg) scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.microjobs-logo-mark {
+		animation: none !important;
+		opacity: 1 !important;
+		transform: rotate(30deg) !important;
+	}
+
+	.microjobs-logo-wordmark {
+		animation: none !important;
+		opacity: 1 !important;
+		transform: none !important;
+	}
+}

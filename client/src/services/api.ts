@@ -1,0 +1,1689 @@
+import { handleInvalidSession, isInvalidTokenError } from "../utils/authSession";
+import { getBearerAccessToken, getBearerRefreshToken, getBearerTrustedDeviceToken, storeBearerTokens, usesBearerAuthTransport } from '../utils/authTransport';
+
+const trimTrailingSlash = (value: string) => value.replace(/\/$/, '');
+
+const normalizeOriginLikeValue = (value: unknown): string | null => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    return `http://localhost:${raw}`;
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    return trimTrailingSlash(raw);
+  }
+  if (/^[a-z0-9.-]+:\d+$/i.test(raw)) {
+    return `http://${raw}`;
+  }
+  return null;
+};
+
+const normalizeApiBase = (value: unknown, fallbackOrigin: string): string => {
+  const raw = String(value || '').trim();
+  if (!raw) return '/api';
+  if (raw.startsWith('/')) {
+    return trimTrailingSlash(raw) || '/api';
+  }
+
+  const normalizedOrigin = normalizeOriginLikeValue(raw);
+  if (normalizedOrigin) {
+    return raw.toLowerCase().includes('/api')
+      ? trimTrailingSlash(raw)
+      : `${normalizedOrigin}/api`;
+  }
+
+  return `${fallbackOrigin}/api`;
+};
+
+const DEV_API_PROXY_TARGET = normalizeOriginLikeValue(import.meta.env.VITE_API_PROXY_TARGET) || 'http://localhost:5050';
+const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE, DEV_API_PROXY_TARGET);
+const DIRECT_API_BASE = `${DEV_API_PROXY_TARGET}/api`;
+const REQUEST_TIMEOUT_MS = 12000;
+
+function buildApiCandidates(path: string) {
+  const primary = `${API_BASE}${path}`;
+  // A direct backend fallback is useful locally, but must never contact a visitor's localhost in production.
+  if (!import.meta.env.DEV || !String(API_BASE).startsWith('/')) {
+    return [primary];
+  }
+  const direct = `${DIRECT_API_BASE}${path}`;
+  if (direct === primary) {
+    return [primary];
+  }
+  return [primary, direct];
+}
+
+export type AuthUser = {
+  id: string;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  email: string;
+  role?: string;
+  phoneNumber?: string;
+  city?: string;
+  country?: string;
+  province?: string;
+  barangay?: string;
+  addressType?: 'home' | 'office' | 'place';
+  address?: string;
+  companyName?: string;
+  linkedin?: string;
+  website?: string;
+  jobPosition?: string;
+  avatarUrl?: string;
+};
+export type AuthResponse = { token: string; user: AuthUser; message?: string };
+export type MfaChallengeResponse = {
+  mfaRequired: true;
+  mfaToken: string;
+  method?: string;
+  message?: string;
+};
+export type LoginOtpChallengeResponse = {
+  otpRequired: true;
+  otpToken: string;
+  message?: string;
+  deliveryEmail?: string;
+  staffLogin?: boolean;
+};
+export type LoginMethodSelectionResponse = {
+  methodSelectionRequired: true;
+  selectionToken: string;
+  methods: Array<"mfa" | "gmail_otp">;
+  message?: string;
+};
+export type LoginResponse =
+  | AuthResponse
+  | MfaChallengeResponse
+  | LoginOtpChallengeResponse
+  | LoginMethodSelectionResponse
+  | {
+      data:
+        | AuthResponse
+        | MfaChallengeResponse
+        | LoginOtpChallengeResponse
+        | LoginMethodSelectionResponse;
+      message?: string;
+    };
+export type TrustedDevice = {
+  _id: string;
+  label?: string;
+  ip?: string;
+  createdAt?: string;
+  lastUsedAt?: string;
+  expiresAt?: string;
+};
+export type WorkExperienceMedia = {
+  _id?: string;
+  url: string;
+  filename?: string;
+  originalName?: string;
+  createdAt?: string;
+};
+export type WorkExperience = {
+  _id?: string;
+  id?: string;
+  title: string;
+  company: string;
+  location?: string;
+  startDate: string;
+  endDate?: string | null;
+  current: boolean;
+  description?: string;
+  media?: WorkExperienceMedia[];
+};
+/** Same field set as WorkExperience minus media — see server/models/User.js. */
+export type Internship = Omit<WorkExperience, 'media'>;
+export type Certificate = {
+  _id?: string;
+  id?: string;
+  name: string;
+  issuer: string;
+  issueDate: string;
+  /** null means "does not expire", which is distinct from "unknown". */
+  expiryDate?: string | null;
+  credentialId?: string;
+  credentialUrl?: string;
+};
+export type PaymentTarget = 'EMPLOYER' | 'WORKER' | 'BOTH';
+export type PaymentTransaction = {
+  _id: string;
+  sender?: { _id?: string; firstName?: string; lastName?: string; email?: string } | null;
+  receiver?: { _id?: string; firstName?: string; lastName?: string; email?: string } | null;
+  amount: number;
+  type: 'TOP_UP' | 'ESCROW' | 'PAYOUT' | 'REFUND' | 'POSTING_FEE';
+  status?: 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  balanceTarget?: 'EMPLOYER' | 'WORKER' | 'ESCROW' | 'SYSTEM';
+  reference?: string | null;
+  provider?: string | null;
+  providerReference?: string | null;
+  relatedEntityType?: string | null;
+  relatedEntityId?: string | null;
+  label?: string | null;
+  meta?: Record<string, unknown>;
+  payoutRequest?: PayoutRequest | null;
+  jobReference?: { _id?: string; title?: string; status?: string } | null;
+  linkedTransaction?: Partial<PaymentTransaction> | null;
+  createdAt?: string;
+};
+export type SavedPaymentMethod = {
+  id: string;
+  cardholderName: string;
+  brand: 'Visa' | 'Mastercard' | 'Card';
+  last4: string;
+  expiry: string;
+  status: 'default' | 'active' | 'expired';
+};
+export type MfaStatus = {
+  enabled: boolean;
+  method: string | null;
+  backupCodesRemaining: number;
+  hasPendingSetup: boolean;
+};
+export type MfaSetup = {
+  method: string;
+  secret: string;
+  otpauthUrl: string;
+};
+export type ApplicationStatus =
+  | 'Applied'
+  | 'Shortlisted'
+  | 'Interview Scheduled'
+  | 'Interviewed'
+  | 'Offer Sent'
+  | 'Hired'
+  | 'Rejected'
+  | 'Withdrawn'
+  | 'Cancelled'
+  | 'Position filled';
+export type SavedJobRecord = {
+  _id: string;
+  job: any;
+  savedAt?: string;
+  createdAt?: string;
+};
+export type SupportTicket = {
+  _id: string;
+  requester?: any;
+  subject: string;
+  category?: string;
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
+  status: 'open' | 'in_progress' | 'waiting_user' | 'resolved' | 'closed';
+  messages?: Array<{
+    _id: string;
+    author?: any;
+    actorRole: 'user' | 'admin';
+    body: string;
+    createdAt: string;
+  }>;
+  internalNotes?: Array<{
+    _id: string;
+    author?: any;
+    body: string;
+    createdAt: string;
+  }>;
+  updatedAt?: string;
+  createdAt?: string;
+  messageCount?: number;
+};
+export type SupportAgent = {
+  _id: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  role?: string;
+  displayName?: string;
+};
+export type PayoutRequest = {
+  _id: string;
+  amount: number;
+  balanceTarget?: 'EMPLOYER' | 'WORKER';
+  status: 'requested' | 'approved' | 'processing' | 'failed' | 'rejected' | 'paid' | 'cancelled';
+  sourceWallet?: 'EMPLOYER' | 'WORKER';
+  processingMode?: 'manual' | 'automatic';
+  reviewReason?: string | null;
+  providerTransferId?: string;
+  providerRailReference?: string;
+  providerFee?: number;
+  failureReason?: string;
+  transferReference?: string;
+  destinationSnapshot: {
+    methodType: string;
+    institutionName: string;
+    accountName: string;
+    accountNumber?: string;
+    accountNumberMasked?: string | null;
+  };
+  reviewNotes?: string | null;
+  reviewedAt?: string | null;
+  paidAt?: string | null;
+  cancelledAt?: string | null;
+  user?: any;
+  reviewer?: any;
+  transaction?: PaymentTransaction | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+type RequestInitInput = Omit<RequestInit, 'body' | 'method'>;
+
+type QueryParams = Record<string, string | number | boolean | null | undefined>;
+
+const AUTH_PATHS_WITHOUT_REFRESH = new Set([
+  '/auth/login',
+  '/auth/register',
+  '/auth/otp/send',
+  '/auth/otp/verify',
+  '/auth/refresh',
+]);
+
+const normalizeApiPath = (value: string) => {
+  const withoutHost = String(value || '').replace(/^https?:\/\/[^/]+/i, '');
+  const withoutApiPrefix = withoutHost.replace(/^\/api/, '');
+  return withoutApiPrefix.split('?')[0];
+};
+
+export const getCsrfToken = () => {
+  if (typeof document === 'undefined') return '';
+  const cookie = document.cookie || '';
+  const match = cookie.match(/(?:^|; )csrfToken=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+};
+
+const shouldAttachCsrfHeader = (method: string) => {
+  const normalizedMethod = method.toUpperCase();
+  return normalizedMethod !== 'GET' && normalizedMethod !== 'HEAD' && normalizedMethod !== 'OPTIONS';
+};
+
+async function performRequest(
+  path: string,
+  method: string,
+  headers: Headers,
+  body: unknown,
+  isFormData: boolean,
+  externalSignal?: AbortSignal | null,
+) {
+  let res: Response | null = null;
+  const candidates = buildApiCandidates(path);
+  let requestTimedOut = false;
+
+  for (const url of candidates) {
+    const controller = new AbortController();
+    let candidateTimedOut = false;
+    const timeoutId = globalThis.setTimeout(() => {
+      candidateTimedOut = true;
+      requestTimedOut = true;
+      controller.abort();
+    }, path.endsWith('/work/submit') ? 120000 : REQUEST_TIMEOUT_MS);
+    const abortFromExternalSignal = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort();
+      else externalSignal.addEventListener('abort', abortFromExternalSignal, { once: true });
+    }
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        credentials: usesBearerAuthTransport() ? 'omit' : 'include',
+        body: body === undefined ? undefined : isFormData ? (body as FormData) : JSON.stringify(body),
+        signal: controller.signal,
+      });
+      break;
+    } catch {
+      if (externalSignal?.aborted) break;
+      if (candidateTimedOut) continue;
+      // Try next candidate URL when network fails.
+    } finally {
+      globalThis.clearTimeout(timeoutId);
+      externalSignal?.removeEventListener('abort', abortFromExternalSignal);
+    }
+  }
+
+  if (!res) {
+if (externalSignal?.aborted) {
+  throw new DOMException('The request was cancelled.', 'AbortError');
+}
+if (requestTimedOut) {
+  throw new Error('The server took too long to respond. Please try again.');
+}
+throw new Error(import.meta.env.DEV
+  ? 'Unable to reach the development API. Make sure the backend is running.'
+  : 'Unable to reach the MicroJobs service. Please try again.');
+  }
+
+  const data = (await parseResponseBody(res)) as any;
+  return { res, data };
+}
+
+/**
+ * Parses a response body, raising rather than inventing one.
+ *
+ * This used to be `res.json().catch(() => ({}))`, which turned any successful
+ * response that was not JSON into an empty object. Nothing downstream could
+ * tell that apart from a real empty payload: a misrouted `/api/*` call served
+ * the SPA's `index.html` with a 200, became `{}` here, and rendered on the
+ * landing page as "no jobs are available" -- an outage reported to the user as
+ * an empty marketplace.
+ *
+ * A body that genuinely has nothing in it is still fine and still yields `{}`:
+ * 204/205 carry no content by definition, and a zero `content-length` says so
+ * outright. An error response is also allowed to be unparseable, because the
+ * caller reports it by status and we must not mask a 500 with a parse error.
+ * What is no longer tolerated is a 2xx that claimed to have a body and then
+ * could not be read as JSON.
+ */
+async function parseResponseBody(res: Response) {
+  if (res.status === 204 || res.status === 205 || res.headers.get('content-length') === '0') {
+    return {};
+  }
+
+  const text = await res.text().catch(() => null);
+  if (text === null) {
+    if (!res.ok) return {};
+    throw new Error(`The server returned an unreadable ${res.status} response.`);
+  }
+  if (text.trim() === '') return {};
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (!res.ok) return {};
+    const contentType = res.headers.get('content-type') || 'an unknown content type';
+    throw new Error(
+      `The server returned ${contentType} instead of JSON (status ${res.status}). ` +
+        'This usually means the API request did not reach the backend.',
+    );
+  }
+}
+
+// The refresh endpoint rotates the refresh token and rejects reuse of the old
+// one. Without this guard, several requests hitting a 401 at the same moment
+// (e.g. a page that fans out on load) would each call refresh independently;
+// only the first would succeed and the rest would be told the token was
+// "already used", logging the user out of a session that was actually fine.
+// Sharing one in-flight promise means concurrent callers see the same result.
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function tryRefreshSession() {
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshInFlight = (async () => {
+    const csrfToken = getCsrfToken();
+    if (!usesBearerAuthTransport() && !csrfToken) return false;
+
+    const refreshCandidates = buildApiCandidates('/auth/refresh');
+    for (const url of refreshCandidates) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          credentials: usesBearerAuthTransport() ? 'omit' : 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(usesBearerAuthTransport() ? { 'x-microjobs-auth-transport': 'bearer' } : { 'x-csrf-token': csrfToken }),
+          },
+          ...(usesBearerAuthTransport() ? { body: JSON.stringify({ refreshToken: getBearerRefreshToken() }) } : {}),
+        });
+        if (response.ok) {
+          storeBearerTokens(await response.json().catch(() => ({})));
+          return true;
+        }
+      } catch {
+        // Try the next refresh candidate on network failure.
+      }
+    }
+
+    return false;
+  })();
+
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
+}
+
+function buildQuery(params?: QueryParams) {
+  if (!params) return '';
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    search.append(key, String(value));
+  });
+  const query = search.toString();
+  return query ? `?${query}` : '';
+}
+
+// Helper function for API requests
+async function request<T>(
+  path: string,
+  options: RequestInitInput & { body?: unknown; method?: string } = {}
+): Promise<T> {
+  const method = options.method || 'GET';
+  const normalizedPath = normalizeApiPath(path);
+  const hasLocalSession = Boolean(
+    localStorage.getItem('auth_user') || localStorage.getItem('current_user')
+  );
+  const body = options.body;
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
+  const headers = new Headers(options.headers || undefined);
+  if (usesBearerAuthTransport()) {
+    headers.set('x-microjobs-auth-transport', 'bearer');
+    const token = getBearerAccessToken();
+    if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
+  }
+  if (!isFormData && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  if (shouldAttachCsrfHeader(method) && !headers.has('x-csrf-token')) {
+    const csrfToken = getCsrfToken();
+    if (csrfToken) {
+      headers.set('x-csrf-token', csrfToken);
+    }
+  }
+
+  let { res, data } = await performRequest(path, method, headers, body, isFormData, options.signal);
+
+  const canAttemptRefresh =
+    !res.ok &&
+    res.status === 401 &&
+    hasLocalSession &&
+    !AUTH_PATHS_WITHOUT_REFRESH.has(normalizedPath);
+  let refreshSucceeded = false;
+
+  if (canAttemptRefresh) {
+    refreshSucceeded = await tryRefreshSession();
+    if (refreshSucceeded) {
+      const retryResult = await performRequest(path, method, headers, body, isFormData, options.signal);
+      res = retryResult.res;
+      data = retryResult.data;
+    }
+  }
+
+  if (!res.ok) {
+    const message = data?.message || 'Request failed';
+    // Only treat this as an invalid session if we never refreshed, or the
+    // refresh itself failed. A successful refresh whose retry still 401s is
+    // some other problem, not an expired session -- don't force a logout.
+    const refreshFailed = canAttemptRefresh ? !refreshSucceeded : true;
+    if (isInvalidTokenError({ status: res.status, message, path, hasToken: hasLocalSession, refreshFailed })) {
+      handleInvalidSession();
+    }
+    const error = new Error(message) as Error & {
+      status?: number;
+      code?: string;
+      blockers?: Array<{ code: string; message: string; count: number }>;
+    };
+    error.status = res.status;
+    if (typeof data?.code === 'string') error.code = data.code;
+    if (Array.isArray(data?.blockers)) error.blockers = data.blockers;
+    throw error;
+  }
+  return data as T;
+}
+
+// Auth APIs
+export function registerUser(payload: { username?: string; firstName?: string; lastName?: string; phoneNumber?: string; email: string; password: string; role?: string }) {
+  return request<AuthResponse>('/auth/register', { method: 'POST', body: payload });
+}
+
+export function loginUser(payload: { emailOrUsername: string; password: string; requireOtp?: boolean; staffOnly?: boolean }) {
+  const trustedDeviceToken = getBearerTrustedDeviceToken();
+  return request<LoginResponse>('/auth/login', { method: 'POST', body: { ...payload, ...(trustedDeviceToken ? { trustedDeviceToken } : {}) } });
+}
+
+export function selectLoginMethod(payload: { selectionToken: string; method: "mfa" | "gmail_otp" }) {
+  return request<LoginResponse>('/auth/login/method', { method: 'POST', body: payload });
+}
+
+export function verifyLoginOtp(payload: { otpToken: string; code: string; rememberDevice?: boolean }) {
+  return request<AuthResponse | { data: AuthResponse }>('/auth/login/otp/verify', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function resendLoginOtp(payload: { otpToken: string }) {
+  return request<LoginOtpChallengeResponse | { data: LoginOtpChallengeResponse }>('/auth/login/otp/resend', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function googleLogin(payload: { credential: string; role?: string }) {
+  return request<LoginResponse>('/auth/google', { method: 'POST', body: payload });
+}
+
+export function verifyLoginMfa(payload: { mfaToken: string; code: string }) {
+  return request<AuthResponse | { data: AuthResponse }>('/auth/login/mfa', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function sendOtp(payload: { email: string }) {
+  return request<{ message: string; code?: string }>('/auth/otp/send', { method: 'POST', body: payload });
+}
+
+export function verifyOtp(payload: { email: string; code: string }) {
+  return request<AuthResponse>('/auth/otp/verify', { method: 'POST', body: payload });
+}
+
+export function logoutUser() {
+  const trustedDeviceToken = getBearerTrustedDeviceToken();
+  return request('/auth/logout', { method: 'POST', ...(trustedDeviceToken ? { body: { trustedDeviceToken } } : {}) });
+}
+
+export function requestPasswordResetOtp(payload: { email: string }) {
+  return request<{ message: string }>('/auth/password-reset/request', { method: 'POST', body: payload });
+}
+
+export function verifyPasswordResetOtp(payload: { email: string; code: string }) {
+  return request<{ message: string }>('/auth/password-reset/verify', { method: 'POST', body: payload });
+}
+
+export function resetPasswordWithOtp(payload: { email: string; code: string; newPassword: string }) {
+  return request<{ message: string }>('/auth/password-reset/confirm', { method: 'POST', body: payload });
+}
+
+export function requestPasswordChangeOtp(payload: { currentPassword: string }) {
+  return request<{ message: string; code?: string }>('/auth/password-change/request', { method: 'POST', body: payload });
+}
+
+export type StaffSecondaryEmailStatus = { email: string; verified: boolean };
+
+export function getStaffSecondaryEmail() {
+  return request<StaffSecondaryEmailStatus>('/auth/secondary-email', { method: 'GET' });
+}
+
+export function requestStaffSecondaryEmailOtp(payload: { email: string; currentPassword: string }) {
+  return request<{ message: string }>('/auth/secondary-email/request', { method: 'POST', body: payload });
+}
+
+export function confirmStaffSecondaryEmailOtp(payload: { email: string; code: string }) {
+  return request<StaffSecondaryEmailStatus>('/auth/secondary-email/confirm', { method: 'POST', body: payload });
+}
+
+export function confirmPasswordChangeWithOtp(payload: { currentPassword: string; code: string; newPassword: string }) {
+  return request<{ message: string }>('/auth/password-change/confirm', { method: 'POST', body: payload });
+}
+
+export function changeInitialPassword(payload: { currentPassword: string; newPassword: string }) {
+  return request<{ message: string }>('/auth/password/initial-change', { method: 'POST', body: payload });
+}
+
+// Category APIs
+export function getCategories() {
+  return request<any[]>('/categories', { method: 'GET' });
+}
+
+export function createCategory(payload: { name: string; description?: string }) {
+  return request('/categories', { method: 'POST', body: payload });
+}
+
+export function deleteCategory(id: string) {
+  return request(`/categories/${id}`, { method: 'DELETE' });
+}
+
+// Job APIs
+export function getJobs(params?: QueryParams) {
+  return request<any[]>(`/jobs${buildQuery(params)}`, { method: 'GET' });
+}
+
+export function getRecommendedJobs(limit = 12) {
+  return request<any[]>(`/jobs/recommended${buildQuery({ limit })}`, { method: 'GET' });
+}
+
+export function getJobDetails(jobId: string) {
+  return request(`/jobs/${jobId}`, { method: 'GET' });
+}
+
+export function createJob(payload: any) {
+  return request('/jobs', { method: 'POST', body: payload });
+}
+
+export function updateJob(jobId: string, payload: any) {
+  return request(`/jobs/${jobId}`, { method: 'PUT', body: payload });
+}
+
+export function deleteJob(jobId: string) {
+  return request<{ message?: string }>(`/jobs/${jobId}`, { method: 'DELETE' });
+}
+
+export function applyForJob(jobId: string, payload?: { resume?: string; coverLetter?: string }) {
+  return request(`/jobs/${jobId}/apply`, { method: 'POST', body: payload });
+}
+
+export function changeJobStatus(jobId: string, status: string) {
+  return request(`/jobs/${jobId}/status`, { method: 'PATCH', body: { status, ...(status === 'Completed' ? { confirmed: true } : {}) } });
+}
+
+export function reopenJob(jobId: string) {
+  return request<{ message?: string }>(`/jobs/${jobId}/reopen`, { method: 'PATCH' });
+}
+
+export function getMyJobs() {
+  return request<any[]>('/jobs/mine', { method: 'GET' });
+}
+
+export type EmployerJobHistoryItem = {
+  _id: string;
+  title: string;
+  status: string;
+  description?: string;
+  location?: string;
+  salary?: number;
+  jobType?: string;
+  deadline?: string;
+  skills?: string[];
+  requirements?: string[];
+  responsibilities?: string[];
+  amountHeld: number;
+  amountPaid: number;
+};
+
+export function getEmployerJobHistory() {
+  return request<EmployerJobHistoryItem[]>('/jobs/history', { method: 'GET' });
+}
+
+// Application APIs
+export function getUserApplications(status?: string) {
+  return request<any[]>(`/applications${buildQuery(status ? { status } : undefined)}`, { method: 'GET' });
+}
+
+export function getEmployerApplications(params?: QueryParams) {
+  return request<any[]>(`/applications/employer${buildQuery(params)}`, { method: 'GET' });
+}
+
+export type ReviewEligibilityItem = {
+  applicationId: string;
+  job: { _id: string; title?: string; status?: string };
+  reviewee?: { _id?: string; firstName?: string; lastName?: string; companyName?: string };
+  canReview: boolean;
+  existingReview?: { _id?: string; rating?: number; comment?: string; createdAt?: string } | null;
+};
+
+export type ReviewSort = 'recent' | 'highest' | 'lowest' | 'helpful';
+
+export type ReviewSummary = {
+  averageRating: number;
+  totalReviews: number;
+  percentage: number;
+  ratingBreakdown: Record<1 | 2 | 3 | 4 | 5, number>;
+};
+
+export type ProfileReview = {
+  _id: string;
+  rating: number;
+  comment?: string;
+  createdAt?: string;
+  reviewerRole: 'worker' | 'employer';
+  revieweeRole: 'worker' | 'employer';
+  reviewer?: {
+    _id?: string;
+    firstName?: string;
+    lastName?: string;
+    companyName?: string;
+    avatarUrl?: string;
+  };
+  job?: { _id?: string; title?: string; category?: { name?: string } | string };
+  ownerReply?: string;
+  ownerReplyAt?: string | null;
+  likeCount: number;
+  dislikeCount: number;
+  viewerReaction?: 'like' | 'dislike' | null;
+  canReply?: boolean;
+};
+
+export function getEligibleReviews() {
+  return request<{ asWorker: ReviewEligibilityItem[]; asEmployer: ReviewEligibilityItem[] }>(
+    '/reviews/eligible',
+    { method: 'GET' }
+  );
+}
+
+export function createReview(payload: {
+  applicationId: string;
+  rating: number;
+  comment?: string;
+  criteria?: Record<string, number>;
+}) {
+  return request('/reviews', { method: 'POST', body: payload });
+}
+
+export function getUserReviews(
+  userId: string,
+  viewAs: 'worker' | 'employer',
+  sort: ReviewSort = 'recent',
+  page = 1,
+  limit = 20
+) {
+  return request<{
+    summary: ReviewSummary;
+    reviews: ProfileReview[];
+    pagination: { page: number; limit: number; total: number; hasMore: boolean };
+  }>(
+    `/reviews/user/${userId}${buildQuery({ as: viewAs, sort, page, limit })}`,
+    { method: 'GET' }
+  );
+}
+
+export function reactToReview(reviewId: string, reaction: 'like' | 'dislike' | null) {
+  return request<{ message: string; review: ProfileReview }>(`/reviews/${reviewId}/reaction`, {
+    method: 'PUT',
+    body: { reaction },
+  });
+}
+
+export function replyToReview(reviewId: string, reply: string) {
+  return request<{ message: string; review: ProfileReview }>(`/reviews/${reviewId}/reply`, {
+    method: 'PATCH',
+    body: { reply },
+  });
+}
+
+export function withdrawApplication(applicationId: string) {
+  return request(`/applications/${applicationId}`, { method: 'DELETE' });
+}
+
+export function updateApplicationStatus(
+  applicationId: string,
+  status: ApplicationStatus | 'Terms' | 'Pending' | 'Reviewed' | 'Accepted'
+) {
+  return request(`/applications/${applicationId}/status`, { method: 'PUT', body: { status } });
+}
+
+export function hideEmployerApplication(applicationId: string) {
+  return request(`/applications/${applicationId}/employer/remove`, { method: 'PATCH' });
+}
+
+export function deleteEmployerApplication(applicationId: string) {
+  return request(`/applications/${applicationId}/employer`, { method: 'DELETE' });
+}
+
+export function markEmployerApplicationRead(applicationId: string) {
+  return request(`/applications/${applicationId}/employer/read`, { method: 'PATCH' });
+}
+
+export function markApplicantApplicationRead(applicationId: string) {
+  return request(`/applications/${applicationId}/applicant/read`, { method: 'PATCH' });
+}
+
+export function scheduleInterview(
+  applicationId: string,
+  payload: { scheduledAt: string; location?: string; mode?: string; notes?: string }
+) {
+  return request(`/applications/${applicationId}/interviews`, { method: 'POST', body: payload });
+}
+
+export function updateInterview(
+  applicationId: string,
+  interviewId: string,
+  payload: { scheduledAt?: string; location?: string; mode?: string; notes?: string }
+) {
+  return request(`/applications/${applicationId}/interviews/${interviewId}`, { method: 'PATCH', body: payload });
+}
+
+export function restoreEmployerApplication(applicationId: string) {
+  return request(`/applications/${applicationId}/employer/restore`, { method: 'PATCH' });
+}
+
+// Job offer APIs
+export type JobOfferStatus = 'pending' | 'accepted' | 'rejected' | 'cancelled' | 'hired' | 'expired';
+
+export type JobOffer = {
+  expiresAt?: string | null;
+  id: string;
+  applicationId: string;
+  jobId: string;
+  employerId: string;
+  workerId: string;
+  amount: number;
+  status: JobOfferStatus;
+  createdAt?: string;
+  acceptedAt?: string | null;
+};
+
+export function createJobOffer(applicationId: string, amount: number) {
+  return request<{ offer: JobOffer }>(`/applications/${applicationId}/offers`, {
+    method: 'POST',
+    body: { amount },
+  });
+}
+
+export function respondToJobOffer(offerId: string, action: 'accept' | 'reject') {
+  return request<{ offer: JobOffer }>(`/job-offers/${offerId}/respond`, {
+    method: 'POST',
+    body: { action, policyAcknowledged: action === 'accept' },
+  });
+}
+
+export function cancelJobOffer(offerId: string, reason: string) {
+  return request<{ offer: JobOffer }>(`/job-offers/${offerId}/cancel`, { method: 'POST', body: { reason, policyAcknowledged: true } });
+}
+
+export function confirmOfferHire(offerId: string, checklist: string[] = []) {
+  return request<{ offer: JobOffer; application: any }>(`/job-offers/${offerId}/confirm-hire`, { method: 'POST', body: { checklist } });
+}
+
+export type HireChecklistItem = { _id: string; description: string; completed: boolean };
+export function updateHireChecklistItem(applicationId: string, itemId: string, completed: boolean) {
+  return request<{ checklist: HireChecklistItem[] }>(`/applications/${applicationId}/checklist/${itemId}`, { method: 'PATCH', body: { completed } });
+}
+
+// Hire work & payment APIs
+export function authorizePayment(applicationId: string) {
+  return request<{ application: any }>(`/applications/${applicationId}/payment/authorize`, { method: 'POST', body: { confirmed: true } });
+}
+
+export function submitWork(applicationId: string, evidence: { statement: string; files: File[]; workDate?: string }) {
+  const body = new FormData();
+  body.append('statement', evidence?.statement || '');
+  if (evidence.workDate) body.append('workDate', evidence.workDate);
+  for (const file of evidence.files) body.append('evidence', file);
+  return request<{ application: any }>(`/applications/${applicationId}/work/submit`, { method: 'POST', body });
+}
+
+export function requestChanges(applicationId: string, reason: string) {
+  return request<{ application: any }>(`/applications/${applicationId}/work/request-changes`, {
+    method: 'POST',
+    body: { reason },
+  });
+}
+
+export function openPaymentDispute(applicationId: string, reason: string, disputedAmount?: number) {
+  return request<{ message: string; dispute: any }>(`/applications/${applicationId}/payment/disputes`, {
+    method: 'POST',
+    body: { reason, ...(disputedAmount === undefined ? {} : { disputedAmount }) },
+  });
+}
+
+export type FinancialDispute = {
+  displayStatus?: string;
+  id: string;
+  _id?: string;
+  ticketId: string;
+  subject: string;
+  investigationStatus: string;
+  settlementStatus: string;
+  paymentStatus: string;
+  fundStatus: 'FUNDS_HELD' | 'OUTSTANDING_PAYMENT' | 'PARTIALLY_HELD';
+  agreedJobAmount: number;
+  alreadyPaidAmount: number;
+  disputedAmount: number;
+  fundsHeldAmount: number;
+  outstandingAmount: number;
+  workerClaim: string;
+  employerResponse?: string;
+  worker?: any;
+  employer?: any;
+  job?: any;
+  application?: any;
+  assignedSupportUserId?: any;
+  assignedFinanceUserId?: any;
+  evidence?: any[];
+  messages?: any[];
+  investigationReport?: any;
+  investigationReportHistory?: any[];
+  financeSettlement?: any;
+  settlementHistory?: any[];
+  auditLogs?: any[];
+  raisedAt?: string;
+  resolvedAt?: string | null;
+  appealSubmittedAt?: string | null;
+};
+
+export function getFinancialDisputes() {
+  return request<{ disputes: FinancialDispute[] }>('/financial-disputes', { method: 'GET' });
+}
+
+export function getFinancialDispute(disputeId: string) {
+  return request<{ dispute: FinancialDispute }>(`/financial-disputes/${disputeId}`, { method: 'GET' });
+}
+
+export function uploadFinancialDisputeEvidence(disputeId: string, payload: { file?: File | null; evidenceType: string; description: string }) {
+  const formData = new FormData();
+  if (payload.file) formData.append('evidence', payload.file);
+  formData.append('evidenceType', payload.evidenceType);
+  formData.append('description', payload.description);
+  return request<{ message: string; dispute: FinancialDispute }>(`/financial-disputes/${disputeId}/evidence`, { method: 'POST', body: formData });
+}
+
+export function addFinancialDisputeMessage(disputeId: string, message: string, visibleToParties = true) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/financial-disputes/${disputeId}/messages`, { method: 'POST', body: { message, visibleToParties } });
+}
+
+export function submitFinancialDisputeEmployerResponse(disputeId: string, response: string) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/financial-disputes/${disputeId}/employer-response`, { method: 'POST', body: { response } });
+}
+
+export function submitFinancialDisputeAppeal(disputeId: string, reason: string) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/financial-disputes/${disputeId}/appeal`, { method: 'POST', body: { reason } });
+}
+
+export function settlePayment(applicationId: string, submittedAt?: string, workDate?: string) {
+  return request<{ message: string; application: any; job: any }>(`/applications/${applicationId}/payment/settle`, {
+    method: 'POST', body: { confirmed: true, ...(submittedAt ? { submittedAt } : {}), ...(workDate ? { workDate } : {}) },
+  });
+}
+
+// User APIs
+export function updateUserStatus(userId: string, status: 'active' | 'pending' | 'disabled') {
+  return request(`/users/${userId}/status`, { method: 'PATCH', body: { status } });
+}
+
+export function updateUserByAdmin(userId: string, payload: { firstName: string; lastName: string; role: string; status: 'active' | 'pending' | 'disabled' | 'banned' }) {
+  return request<{ message: string; user: any }>(`/users/${userId}`, { method: 'PATCH', body: payload });
+}
+
+export function createUserByAdmin(payload: { firstName: string; lastName: string; email: string; password: string; role: 'work' | 'hire' | 'admin' }) {
+  return request<{ message: string; user: any }>('/users', { method: 'POST', body: payload });
+}
+
+export function deleteUser(userId: string) {
+  return request(`/users/${userId}`, { method: 'DELETE' });
+}
+
+export function requestAccountDeletion(payload: { currentPassword: string; confirm: string }) {
+  return request<{ message: string; blockers?: Array<{ code: string; message: string; count: number }> }>(
+    '/auth/me/delete',
+    { method: 'POST', body: payload }
+  );
+}
+
+// Profile APIs
+let inFlightProfileRequest: Promise<any> | null = null;
+
+export function getProfile() {
+  if (!inFlightProfileRequest) {
+    inFlightProfileRequest = request<any>('/auth/me', { method: 'GET' })
+      .then((response: any) => response?.data ?? response?.profile ?? response?.user ?? response)
+      .finally(() => {
+        inFlightProfileRequest = null;
+      });
+  }
+  return inFlightProfileRequest;
+}
+
+export function updateJobPreferences(payload: { preferredCategories: string[]; jobPreferences: string[] }) {
+  return request('/auth/profile/job-preferences', { method: 'PATCH', body: payload });
+}
+
+export function updateProfile(payload: {
+  firstName?: string;
+  lastName?: string;
+  phoneNumber?: string;
+  city?: string;
+  province?: string;
+  barangay?: string;
+  addressType?: 'home' | 'office' | 'place';
+  address?: string;
+  companyName?: string;
+  linkedin?: string;
+  website?: string;
+  jobPosition?: string;
+  about?: string;
+  totalExperience?: string;
+  hideHiredCandidates?: boolean;
+  // Note: projectsCompleted, jobsApplied, and successRate are auto-calculated by backend
+}) {
+  return request<any>('/auth/me', { method: 'PATCH', body: payload }).then((response: any) => {
+    return response?.data ?? response?.profile ?? response?.user ?? response;
+  });
+}
+
+export function getPublicProfile(userId: string, viewAs: 'worker' | 'employer' = 'worker') {
+  return request<any>(`/auth/profiles/${userId}${buildQuery({ viewAs })}`, { method: 'GET' });
+}
+
+export function addWorkExperience(payload: Omit<WorkExperience, '_id' | 'id'>) {
+  return request<{ workExperience: WorkExperience[] }>('/auth/profile/experience', {
+    method: 'POST',
+    body: payload,
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function updateWorkExperience(experienceId: string, payload: Partial<WorkExperience>) {
+  return request<{ workExperience: WorkExperience[] }>(`/auth/profile/experience/${experienceId}`, {
+    method: 'PATCH',
+    body: payload,
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function deleteWorkExperience(experienceId: string) {
+  return request<{ workExperience: WorkExperience[] }>(`/auth/profile/experience/${experienceId}`, {
+    method: 'DELETE',
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function uploadExperienceMedia(experienceId: string, file: File) {
+  const formData = new FormData();
+  formData.append('media', file);
+  return request<{ workExperience: WorkExperience[] }>(`/auth/profile/experience/${experienceId}/media`, {
+    method: 'POST',
+    body: formData,
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function deleteExperienceMedia(experienceId: string, mediaId: string) {
+  return request<{ workExperience: WorkExperience[] }>(`/auth/profile/experience/${experienceId}/media/${mediaId}`, {
+    method: 'DELETE',
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function addInternship(payload: Omit<Internship, '_id' | 'id'>) {
+  return request<{ internships: Internship[] }>('/auth/profile/internships', {
+    method: 'POST',
+    body: payload,
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function updateInternship(internshipId: string, payload: Partial<Internship>) {
+  return request<{ internships: Internship[] }>(`/auth/profile/internships/${internshipId}`, {
+    method: 'PATCH',
+    body: payload,
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function deleteInternship(internshipId: string) {
+  return request<{ internships: Internship[] }>(`/auth/profile/internships/${internshipId}`, {
+    method: 'DELETE',
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function addCertificate(payload: Omit<Certificate, '_id' | 'id'>) {
+  return request<{ certificates: Certificate[] }>('/auth/profile/certificates', {
+    method: 'POST',
+    body: payload,
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function updateCertificate(certificateId: string, payload: Partial<Certificate>) {
+  return request<{ certificates: Certificate[] }>(`/auth/profile/certificates/${certificateId}`, {
+    method: 'PATCH',
+    body: payload,
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function deleteCertificate(certificateId: string) {
+  return request<{ certificates: Certificate[] }>(`/auth/profile/certificates/${certificateId}`, {
+    method: 'DELETE',
+  }).then((response: any) => response?.data ?? response);
+}
+
+export function addProfileSkill(payload: { name: string; description?: string }) {
+  return request<{ message?: string; data?: { skills?: any[] }; skills?: any[] }>('/auth/profile/skills', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function updateProfileSkill(skillId: string, payload: { description: string }) {
+  return request<{ message?: string; data?: { skills?: any[] }; skills?: any[] }>(`/auth/profile/skills/${skillId}`, {
+    method: 'PATCH',
+    body: payload,
+  });
+}
+
+export function deleteProfileSkill(skillId: string) {
+  return request<{ message?: string; data?: { skills?: any[] }; skills?: any[] }>(`/auth/profile/skills/${skillId}`, {
+    method: 'DELETE',
+  });
+}
+
+// Multi-factor authentication APIs
+export function getMfaStatus() {
+  return request<{ data?: MfaStatus } & Partial<MfaStatus>>('/auth/mfa/status', { method: 'GET' })
+    .then((response) => (response.data ?? response) as MfaStatus);
+}
+
+export function startMfaSetup() {
+  return request<{ data?: MfaSetup } & Partial<MfaSetup>>('/auth/mfa/setup', { method: 'POST' })
+    .then((response) => (response.data ?? response) as MfaSetup);
+}
+
+export function enableMfa(code: string) {
+  return request<{ data?: MfaStatus & { backupCodes: string[] } } & Partial<MfaStatus> & { backupCodes?: string[] }>(
+    '/auth/mfa/enable',
+    { method: 'POST', body: { code } }
+  ).then((response) => (response.data ?? response) as MfaStatus & { backupCodes: string[] });
+}
+
+export function disableMfa(code: string) {
+  return request<{ data?: MfaStatus } & Partial<MfaStatus>>('/auth/mfa/disable', {
+    method: 'POST',
+    body: { code },
+  }).then((response) => (response.data ?? response) as MfaStatus);
+}
+
+export function regenerateMfaBackupCodes(code: string) {
+  return request<{ data?: MfaStatus & { backupCodes: string[] } } & Partial<MfaStatus> & { backupCodes?: string[] }>(
+    '/auth/mfa/backup-codes/regenerate',
+    { method: 'POST', body: { code } }
+  ).then((response) => (response.data ?? response) as MfaStatus & { backupCodes: string[] });
+}
+
+// Notifications APIs
+export type NotificationMode = 'worker' | 'employer';
+export type NotificationListResponse = { notifications: any[]; unreadCount: number; nextCursor: string | null };
+export function getNotifications(params?: QueryParams) {
+  return request<NotificationListResponse>(`/notifications${buildQuery(params)}`, { method: 'GET' });
+}
+
+export function markNotificationRead(notificationId: string, mode?: NotificationMode) {
+  return request(`/notifications/${notificationId}/read${buildQuery({ mode })}`, { method: 'PATCH' });
+}
+
+export function markNotificationUnread(notificationId: string, mode?: NotificationMode) {
+  return request(`/notifications/${notificationId}/unread${buildQuery({ mode })}`, { method: 'PATCH' });
+}
+
+export function markAllNotificationsRead(mode?: NotificationMode) {
+  return request(`/notifications/read-all${buildQuery({ mode })}`, { method: 'PATCH' });
+}
+
+export function deleteNotification(notificationId: string, mode?: NotificationMode) {
+  return request(`/notifications/${notificationId}${buildQuery({ mode })}`, { method: 'DELETE' });
+}
+
+export function deleteReadNotifications(mode?: NotificationMode) {
+  return request(`/notifications/read${buildQuery({ mode })}`, { method: 'DELETE' });
+}
+
+export function registerPushDevice(payload: { token: string; deviceName?: string; platform?: 'expo' }) {
+  return request<{ message: string; device: any }>('/notifications/devices', { method: 'POST', body: payload });
+}
+
+// Social sign-in
+export function googleSignIn(idToken: string) {
+  return request<{ token?: string; user?: any; message?: string }>(`/auth/google`, { method: 'POST', body: { idToken } });
+}
+
+// Sessions APIs
+export function getSessions() {
+  return request<{ sessions: any[] }>('/auth/sessions', { method: 'GET' });
+}
+
+export function revokeSession(sessionId: string) {
+  return request('/auth/sessions/' + sessionId, { method: 'DELETE' });
+}
+
+export function revokeAllSessions() {
+  return request('/auth/sessions', { method: 'DELETE' });
+}
+
+export function cleanupInactiveSessions() {
+  return request<{ message: string; deletedCount: number }>('/auth/sessions/cleanup', { method: 'POST' });
+}
+
+export function getTrustedDevices() {
+  return request<{ devices: TrustedDevice[] }>('/auth/trusted-devices', { method: 'GET' });
+}
+
+export function revokeTrustedDevice(deviceId: string) {
+  return request('/auth/trusted-devices/' + deviceId, { method: 'DELETE' });
+}
+
+// Verification APIs
+export function getVerificationStatus() {
+  return request<{
+    steps: Array<{
+      id: string;
+      title: string;
+      description: string;
+      status: 'complete' | 'in-review' | 'pending' | 'rejected';
+    }>;
+    completedSteps: number;
+    completionPercent: number;
+  }>('/auth/verification/status', { method: 'GET' });
+}
+
+export function requestPhoneVerificationOtp() {
+  return request<{
+    message: string;
+    provider?: string;
+    phoneMasked?: string;
+    expiresInSec?: number;
+    devCode?: string;
+  }>('/auth/verification/phone', { method: 'POST' });
+}
+
+export function confirmPhoneVerificationOtp(payload: { code: string }) {
+  return request<{ message: string; verified: boolean }>('/auth/verification/phone/confirm', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function uploadAddressDocument(file: File) {
+  const formData = new FormData();
+  formData.append('document', file);
+  return request<{ message: string; documentUrl: string; status: string }>(
+    '/auth/verification/documents/address',
+    { method: 'POST', body: formData }
+  );
+}
+
+// Payments APIs
+export function getPaymentMethods() {
+  return request<{ paymentMethods: SavedPaymentMethod[] }>('/payment/methods', { method: 'GET' });
+}
+
+export function addPaymentMethod(payload: {
+  cardholderName: string;
+  brand: SavedPaymentMethod['brand'];
+  last4: string;
+  expiryMonth: number;
+  expiryYear: number;
+}) {
+  return request<{ message: string; paymentMethod: SavedPaymentMethod }>('/payment/methods', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function setDefaultPaymentMethod(paymentMethodId: string) {
+  return request<{ message: string; paymentMethods: SavedPaymentMethod[] }>(
+    `/payment/methods/${paymentMethodId}/default`,
+    { method: 'PATCH' }
+  );
+}
+
+export function removePaymentMethod(paymentMethodId: string) {
+  return request<{ message: string; paymentMethods: SavedPaymentMethod[] }>(
+    `/payment/methods/${paymentMethodId}`,
+    { method: 'DELETE' }
+  );
+}
+
+export function createTopUpSession(payload: { amount: number; target?: PaymentTarget }) {
+  return request<{ checkoutUrl: string; referenceNumber: string; checkoutId: string; depositAmount: number; processingFee: number; totalAmountCharged: number }>(
+    '/payment/topup',
+    { method: 'POST', body: payload },
+  );
+}
+
+export function confirmTopUp(payload: { referenceNumber?: string; checkoutId?: string }) {
+  return request<{
+    message: string;
+    transaction?: PaymentTransaction;
+    transactions?: PaymentTransaction[];
+  }>('/payment/topup/confirm', { method: 'POST', body: payload });
+}
+
+export function getPaymentTransactions() {
+  return request<{ transactions: PaymentTransaction[] }>('/payment/transactions', { method: 'GET' });
+}
+
+export function getPayoutRequests(balanceTarget?: 'EMPLOYER' | 'WORKER') {
+  return request<{ payoutRequests: PayoutRequest[] }>(`/payment/payout-requests${buildQuery(balanceTarget ? { balanceTarget } : undefined)}`, { method: 'GET' });
+}
+
+export function createPayoutRequest(payload: {
+  amount: number;
+  balanceTarget?: 'EMPLOYER' | 'WORKER';
+  idempotencyKey?: string;
+  destinationSnapshot: {
+    methodType: string;
+    institutionName: string;
+    accountName: string;
+    accountNumber: string;
+  };
+}) {
+  return request<{ message: string; payoutRequest: PayoutRequest }>('/payment/payout-requests', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function cancelPayoutRequest(payoutRequestId: string) {
+  return request<{ message: string; payoutRequest: PayoutRequest }>(
+    `/payment/payout-requests/${payoutRequestId}/cancel`,
+    { method: 'POST' }
+  );
+}
+
+export function getSupportTickets() {
+  return request<{ tickets: SupportTicket[] }>('/support/tickets', { method: 'GET' });
+}
+
+export function getSupportAgents() {
+  return request<{ agents: SupportAgent[] }>('/support/agents', { method: 'GET' });
+}
+
+export function getSupportTicket(ticketId: string) {
+  return request<{ ticket: SupportTicket }>(`/support/tickets/${ticketId}`, { method: 'GET' });
+}
+
+export function createSupportTicket(payload: {
+  subject: string;
+  category?: string;
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
+  message: string;
+}) {
+  return request<{ message: string; ticket: SupportTicket }>('/support/tickets', { method: 'POST', body: payload });
+}
+
+export function replyToSupportTicket(ticketId: string, payload: { message: string }) {
+  return request<{ message: string; ticket: SupportTicket }>(`/support/tickets/${ticketId}/replies`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function getSavedJobs() {
+  return request<{ savedJobs: SavedJobRecord[] }>('/saved-jobs', { method: 'GET' });
+}
+
+export function saveJobForLater(jobId: string) {
+  return request<{ savedJob: SavedJobRecord }>('/saved-jobs', { method: 'POST', body: { jobId } });
+}
+
+export function removeSavedJob(jobId: string) {
+  return request<{ jobId: string }>(`/saved-jobs/${jobId}`, { method: 'DELETE' });
+}
+
+// Message APIs
+export type MessageReportCategory = 'abuse' | 'scam' | 'threats' | 'other';
+
+export function reportConversation(payload: { otherUserId: string; jobId?: string | null; category: MessageReportCategory; details: string }) {
+  return request<{ reportId: string; status: 'pending'; alreadyPending: boolean }>('/messages/report', { method: 'POST', body: payload });
+}
+
+export function sendMessage(payload: { receiverId: string; content: string; jobId?: string; clientMessageId?: string }) {
+  return request<any>('/messages', { method: 'POST', body: payload });
+}
+
+export type JobInquiryConversation = {
+  conversationId: string;
+  otherUserId: string;
+  otherUserName: string;
+  jobId: string | null;
+  jobTitle: string | null;
+};
+
+/**
+ * Opens the worker -> employer inquiry thread for a job. The server resolves the
+ * employer from the job post, so the caller never has to guess the recipient.
+ */
+export function startJobInquiry(
+  jobId: string,
+  payload?: { content?: string; sendInitialMessage?: boolean; clientMessageId?: string },
+) {
+  return request<{ conversation: JobInquiryConversation; message: any | null }>(
+    `/messages/inquiries/${jobId}`,
+    { method: 'POST', body: payload || {} },
+  );
+}
+
+export function getConversations() {
+  return request<any[]>('/messages/conversations', { method: 'GET' });
+}
+
+export type MessageRecipient = { id: string; name: string; email: string; role: string; isStaff: boolean };
+export type MessageRecipientDirectory = { recipients: MessageRecipient[]; total: number; page: number; pageCount: number; pageSize: number };
+
+export async function getMessageRecipients(query: { search: string; audience: 'all' | 'admins' | 'users'; page: number }, signal?: AbortSignal) {
+  const response = await request<MessageRecipientDirectory | { data: MessageRecipientDirectory }>(`/messages/recipients${buildQuery(query)}`, { method: 'GET', signal });
+  return 'data' in response ? response.data : response;
+}
+
+
+export function getConversationWithUser(otherUserId: string, jobId?: string) {
+  return request<any[]>(`/messages/conversation/${otherUserId}${buildQuery(jobId ? { jobId } : undefined)}`, { method: 'GET' });
+}
+
+export function blockUser(otherUserId: string, jobId?: string) {
+  return request<any>('/messages/block', { method: 'POST', body: { otherUserId, jobId: jobId || null } });
+}
+
+export function unblockUser(otherUserId: string) {
+  return request<any>('/messages/unblock', { method: 'POST', body: { otherUserId } });
+}
+
+export function archiveConversation(otherUserId: string, jobId?: string, archive: boolean = true) {
+  return request<any>('/messages/archive', { method: 'POST', body: { otherUserId, jobId: jobId || null, archive } });
+}
+
+export function deleteConversation(otherUserId: string, jobId?: string) {
+  return request<any>('/messages/conversation', { method: 'DELETE', body: { otherUserId, jobId: jobId || null } });
+}
+
+export function getBlockedUsers() {
+  return request<any[]>('/messages/blocked', { method: 'GET' });
+}
+
+export function getArchivedConversations() {
+  return request<any[]>('/messages/archived', { method: 'GET' });
+}
+
+export function markMessagesAsRead(otherUserId: string, jobId?: string) {
+  return request<any>('/messages/read', { method: 'PATCH', body: { otherUserId, jobId: jobId || null, read: true } });
+}
+
+export function editMessage(messageId: string, content: string) {
+  return request<any>(`/messages/edit/${messageId}`, { method: 'PATCH', body: { content } });
+}
+// Resume APIs
+export async function uploadResume(file: File) {
+  const formData = new FormData();
+  formData.append('resume', file);
+  return request<any>('/auth/profile/resume', { method: 'POST', body: formData });
+}
+
+export function deleteResume() {
+  return request<any>('/auth/profile/resume', { method: 'DELETE' });
+}
+
+// Avatar APIs
+export async function uploadAvatar(file: File) {
+  const formData = new FormData();
+  formData.append('avatar', file);
+  return request<any>('/auth/profile/avatar', { method: 'POST', body: formData });
+}
+
+export function deleteAvatar() {
+  return request<any>('/auth/profile/avatar', { method: 'DELETE' });
+}
+
+/**
+ * ADMIN APIS - Data for admin dashboard
+ */
+export function getAdminStats() {
+  return request<any>('/admin/stats', { method: 'GET' });
+}
+
+export function getAdminAnalyticsData() {
+  return request<{ stats: any; users: any[]; jobs: any[]; transactions: PaymentTransaction[] }>('/admin/analytics-data', { method: 'GET' });
+}
+
+export function getAdminUsers() {
+  return request<any[]>('/admin/users', { method: 'GET' });
+}
+
+export function requestAdminUserPasswordReset(userId: string) {
+  return request<{ message: string }>(`/admin/users/${userId}/password-reset`, { method: 'POST' });
+}
+
+export function unlockAdminUser(userId: string) {
+  return request<{ message: string; userId: string; loginLocked: false }>(`/admin/users/${userId}/unlock`, { method: 'PATCH' });
+}
+
+export function updateAdminUserSuspiciousFlag(userId: string, payload: { flagged: boolean; reason?: string }) {
+  return request<{
+    message: string;
+    user: {
+      _id: string;
+      suspiciousFlagged: boolean;
+      suspiciousFlagReason: string | null;
+      suspiciousFlaggedAt: string | null;
+      suspiciousFlaggedBy: string | null;
+    };
+  }>(`/admin/users/${userId}/suspicious-flag`, { method: 'PATCH', body: payload });
+}
+
+export function banAdminUser(userId: string, reason: string) {
+  return request<{ message: string; user: { _id: string; status: 'banned'; banReason: string } }>(`/admin/users/${userId}/ban`, {
+    method: 'PATCH',
+    body: { reason },
+  });
+}
+
+export interface GovernmentIdVerificationRecord {
+  _id: string;
+  user: { _id: string; role: string };
+  userName: string;
+  govIdName: string;
+  documentType: string;
+  date: string;
+  verified: boolean;
+}
+
+export function getGovernmentIdVerifications() {
+  return request<GovernmentIdVerificationRecord[]>('/admin/government-id-verifications', { method: 'GET' });
+}
+
+export function revokeGovernmentIdVerification(verificationId: string) {
+  return request<{ message: string; verificationId: string; verified: false }>(
+    `/admin/government-id-verifications/${verificationId}/revoke`, { method: 'PATCH', body: {} },
+  );
+}
+
+export function updateAdminVerification(
+  userId: string,
+  documentType: 'identity' | 'address',
+  payload: { status: 'complete' | 'rejected'; rejectionReason?: string },
+) {
+  return request<{
+    message: string;
+    userId: string;
+    documentType: 'identity' | 'address';
+    status: 'complete' | 'rejected';
+    verified: boolean;
+  }>(`/admin/verifications/${userId}/${documentType}`, { method: 'PATCH', body: payload });
+}
+
+export function getAdminJobs() {
+  return request<any[]>('/admin/jobs', { method: 'GET' });
+}
+
+export function getAdminCategories() {
+  return request<any[]>('/admin/categories', { method: 'GET' });
+}
+
+export function getAdminWalletStats() {
+  return request<any>('/admin/wallets', { method: 'GET' });
+}
+
+export function getAdminRecentPayouts() {
+  return request<any[]>('/admin/recent-payouts', { method: 'GET' });
+}
+
+export function getAdminTransactions() {
+  return request<any[]>('/admin/transactions', { method: 'GET' });
+}
+
+export function getAdminPayoutRequests(params?: QueryParams) {
+  return request<{ payoutRequests: PayoutRequest[] }>(`/admin/payout-requests${buildQuery(params)}`, { method: 'GET' });
+}
+
+export function updateAdminPayoutRequest(
+  payoutRequestId: string,
+  payload: { status: 'approved' | 'rejected' | 'paid'; reviewNotes?: string; transferReference?: string }
+) {
+  return request<{ payoutRequest: PayoutRequest }>(`/admin/payout-requests/${payoutRequestId}`, {
+    method: 'PATCH',
+    body: payload,
+  });
+}
+
+export function getAdminSupportTickets(params?: QueryParams) {
+  return request<{ tickets: SupportTicket[] }>(`/admin/support/tickets${buildQuery(params)}`, { method: 'GET' });
+}
+
+export function getAdminSupportTicket(ticketId: string) {
+  return request<{ ticket: SupportTicket }>(`/admin/support/tickets/${ticketId}`, { method: 'GET' });
+}
+
+export function updateAdminSupportTicket(
+  ticketId: string,
+  payload: { status?: SupportTicket['status']; priority?: SupportTicket['priority']; reviewNotes?: string }
+) {
+  return request<{ ticket: SupportTicket }>(`/admin/support/tickets/${ticketId}`, {
+    method: 'PATCH',
+    body: payload,
+  });
+}
+
+export function replyToAdminSupportTicket(ticketId: string, payload: { message: string }) {
+  return request<{ ticket: SupportTicket }>(`/admin/support/tickets/${ticketId}/replies`, {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export function getAdminAuditLogs(params?: { limit?: number }) {
+  return request<any[]>(`/admin/audit-logs${buildQuery(params)}`, { method: 'GET' });
+}
+
+export function getAdminStaff() {
+  return request<any[]>('/admin/staff', { method: 'GET' });
+}
+
+export function createAdminStaff(payload: { firstName: string; lastName: string; email: string; password: string; staffRole: string }) {
+  return request<{ message: string; staff: any }>('/admin/staff', { method: 'POST', body: payload });
+}
+
+export function updateAdminStaff(userId: string, payload: { staffRole?: string; status?: 'active' | 'disabled' }) {
+  return request<{ message: string; staff: any }>(`/admin/staff/${userId}`, { method: 'PATCH', body: payload });
+}
+
+export function getAdminModerationReports() {
+  return request<any[]>('/admin/moderation/reports', { method: 'GET' });
+}
+
+export function updateAdminModerationReport(reportId: string, payload: { status: 'resolved' | 'dismissed'; resolution?: string }) {
+  return request<{ message: string; report: any }>(`/admin/moderation/reports/${reportId}`, { method: 'PATCH', body: payload });
+}
+
+export function getAdminFinancialDisputes() {
+  return request<FinancialDispute[]>('/admin/finance/disputes', { method: 'GET' });
+}
+
+export function updateAdminFinancialDispute(
+  disputeId: string,
+  payload: { status: 'open' | 'investigating' | 'resolved' | 'rejected'; resolutionNotes?: string; workerPayoutAmount?: number; workerPayment?: number },
+) {
+  return request<{ message: string; dispute: any }>(`/admin/finance/disputes/${disputeId}`, { method: 'PATCH', body: payload });
+}
+
+export function assignFinancialDisputeSupport(disputeId: string, assignedSupportUserId?: string) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/admin/finance/disputes/${disputeId}/assign-support`, { method: 'POST', body: { assignedSupportUserId } });
+}
+
+export function requestFinancialDisputeEvidence(disputeId: string, target: 'worker' | 'employer', message: string) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/admin/finance/disputes/${disputeId}/evidence-request`, { method: 'POST', body: { target, message } });
+}
+
+export function completeFinancialDisputeInvestigation(disputeId: string, report: Record<string, string>) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/admin/finance/disputes/${disputeId}/investigation-report`, { method: 'POST', body: report });
+}
+
+export function proposeFinancialDisputeSettlement(disputeId: string, payload: { settlementType: 'FULL_REFUND' | 'COMPLETE_PAYMENT' | 'PARTIAL_PAYMENT'; workerAmount?: number; employerRefund?: number; decisionReason: string }) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/admin/finance/disputes/${disputeId}/settlement`, { method: 'POST', body: payload });
+}
+
+export function approveFinancialDisputeSettlement(disputeId: string) {
+  return request<{ message: string; dispute: FinancialDispute }>(`/admin/finance/disputes/${disputeId}/settlement/approve`, { method: 'POST' });
+}
+
+export type WithdrawalPreview = {
+  reviewReason?: string | null; requiresReview?: boolean; minimum: number; maximum: number | null; reviewThreshold: number;
+  previewToken: string; sourceWallet: 'EMPLOYER' | 'WORKER'; amount: number; fee: number; totalDebit: number; remainingBalance: number;
+  destination: { institutionName: string; accountName: string; accountNumberMasked: string };
+};
+export const getWithdrawalPolicy = (sourceWallet: string) => request<{ minimum: number; maximum: number | null; reviewThreshold: number }>(`/payment/withdrawals/policy?sourceWallet=${sourceWallet}`, { method: 'GET' });
+export const getWithdrawalInstitutions = () => request<{ institutions: Array<{ bic: string; name: string }> }>('/payment/withdrawals/institutions', { method: 'GET' });
+export const previewWithdrawal = (body: { sourceWallet: string; amount: number; destinationSnapshot: Record<string, string> }) => request<WithdrawalPreview>('/payment/withdrawals/preview', { method: 'POST', body });
+export const confirmWithdrawal = (previewToken: string) => request<{ payoutRequest: PayoutRequest }>('/payment/withdrawals/confirm', { method: 'POST', body: { previewToken, detailsConfirmed: true } });
+export const lifecycleRequest = (path: string, body?: any, method = body ? 'POST' : 'GET') => request<any>(path, { method, ...(body ? { body } : {}) });

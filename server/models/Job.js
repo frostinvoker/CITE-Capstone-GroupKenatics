@@ -1,0 +1,140 @@
+import mongoose from 'mongoose';
+import { ALL_JOB_TYPES } from '../lib/jobPosting.js';
+
+const JobSchema = new mongoose.Schema(
+    {
+        fundsVersion: { type: Number, default: 0 },
+        paymentMode: { type: String, enum: ['assignment', 'daily'], default: 'assignment' },
+        workDates: { type: [String], default: [] },
+        workStartTime: { type: String, default: null },
+        workEndTime: { type: String, default: null },
+        interviewRequired: { type: Boolean, default: false },
+        archivedAt: { type: Date, default: null },
+        repostOf: { type: mongoose.Schema.Types.ObjectId, ref: 'Job', default: null },
+        cancellationPending: { type: Boolean, default: false },
+        cancellationReason: { type: String, default: null },
+        cancelledAt: { type: Date, default: null },
+        title: {
+            type: String,
+            maxlength: 100,
+            required: true
+        },
+        description: {
+            type: String,
+            maxlength: 1000,
+            required: true,
+        },
+        location: {
+            type: String,
+            required: true
+        },
+        salary: {
+            type: Number,
+            required: true,
+            min: 1,
+        },
+        jobType: {
+            type: String,
+            enum: ALL_JOB_TYPES,
+            required: true
+        },
+        deadline: {
+            type: Date,
+            required: true
+        },
+        skills: [{
+            type: String
+        }],
+        responsibilities: [{
+            type: String
+        }],
+        requirements: [{
+            type: String
+        }],
+        image: {
+            type: String,
+            default: null,
+        },
+        status: {
+            type: String,
+            enum: ['Available', 'In Progress', 'Completed', 'Cancelled', 'Closed', 'Full refund', 'Resolved'],
+            default: 'Available',
+        },
+        urgent: {
+            type: Boolean,
+            default: false,
+        },
+        // A paid promotion that only affects discovery order. The fees are
+        // persisted for the listing audit trail and are never refundable.
+        highlighted: {
+            type: Boolean,
+            default: false,
+        },
+        postingFee: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+        highlightFee: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+        // Number of workers needed for this job post
+        positionsNeeded: {
+            type: Number,
+            default: 1,
+            min: 1,
+        },
+        // How many applicants have been hired
+        // Denormalised counter kept in step with the JobView collection, which
+        // holds one row per unique viewer — see lib/jobViews.js. Reading a
+        // number here keeps admin analytics cheap; JobView is the source of truth.
+        viewCount: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+        hiredCount: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+        // Permanent employer deletion lock, including after an assignment ends.
+        hireConfirmedAt: { type: Date, default: null },
+        reservedOfferCount: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+        // True when the employer closed this post by hand rather than it being
+        // closed automatically because every position was filled/reserved.
+        // Capacity changes must not silently reopen a deliberately closed post.
+        closedManually: {
+            type: Boolean,
+            default: false,
+        },
+
+        category: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Category',
+        },
+        jobPoster:{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            required: true,
+        },
+        applicants: [{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+        }],
+        selectedApplicant: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null
+        },
+    },
+    { timestamps: true, versionKey: false }
+)
+
+export default mongoose.model('Job', JobSchema);

@@ -1,0 +1,1465 @@
+import User from "../models/User.js";
+import GovernmentIdVerification from "../models/GovernmentIdVerification.js";
+import PendingIdScan from "../models/PendingIdScan.js";
+import JobApplication from "../models/JobApplication.js";
+import Job from "../models/Job.js";
+import Session from "../models/Session.js";
+import PayoutRequest from "../models/PayoutRequest.js";
+import PushDevice from "../models/PushDevice.js";
+import SavedJob from "../models/SavedJob.js";
+import Notification from "../models/Notification.js";
+import { getPublicProfileAccessError } from "../lib/staffProfileVisibility.js";
+import { resolvePublicId } from "../lib/publicId.js";
+import { getEmailTransporter, getMailFrom } from "../lib/emailTransporter.js";
+import { disconnectSession } from "../lib/socket.js";
+import { deleteStoredUpload } from "../lib/uploadStore.js";
+import {
+    EMAIL_VALIDATION_MESSAGE,
+    NAME_VALIDATION_MESSAGE,
+    PHONE_VALIDATION_MESSAGE,
+    isValidEmail,
+    isValidName,
+    isValidPhone,
+    normalizeEmail,
+    normalizeName,
+    normalizePhone,
+} from "../lib/authValidation.js";
+import { isStrongPassword, PASSWORD_POLICY_MESSAGE } from "../lib/passwordPolicy.js";
+import { clearPhoneVerificationCode } from "./PhoneVerificationController.js";
+import { getAdminUserCreationError, getAdminUserMutationError } from "../lib/adminUserPolicy.js";
+import { getReviewSummary } from "../lib/reviewSummary.js";
+import { buildAuthTokensPayload, createSessionWithTokens, setSessionCookies, isNativeAuthRequest, isBearerAuthRequest } from "../lib/authSession.js";
+import { issueTrustedDevice, setTrustedDeviceCookie, clearTrustedDevicesForUser } from "../lib/trustedDevice.js";
+import crypto from "node:crypto";
+import { clearOtpChallenges, clearUserOtpChallenges, issueOtpChallenge, rememberTestOtpCode, verifyOtpChallenge } from "../lib/otpChallenges.js";
+import monitor from "../lib/monitor.js";
+import { isStaffAccount, hasVerifiedSecondaryEmail, staffPasswordChangeSubject } from "../lib/staffSecurity.js";
+import { getWebOrigin } from "../lib/runtimeConfig.js";
+import { deleteAvatarFromAzure } from "../lib/azureAvatarStorage.js";
+
+const OTP_GENERIC_MESSAGE = "If the account exists, an OTP has been sent.";
+// One message for every outcome of a password-reset request. Distinct replies
+// per outcome let an unauthenticated caller confirm which emails are
+// registered (OWASP ASVS 3.2.2) — the same reason AuthController's login
+// returns one generic "incorrect credentials" string.
+const PASSWORD_RESET_GENERIC_MESSAGE = "If the email is registered, a reset code has been sent.";
+const APP_NAME = "MicroJobs";
+const getPasswordResetEmailFrom = () => {
+    const address = getMailFrom();
+    // Already a display-name form such as "MicroJobs <no-reply@example.com>".
+    return address.includes('<') ? address : `${APP_NAME} <${address}>`;
+};
+const OTP_EXPIRY_MINUTES = 5;
+
+const escapeHtml = (value = "") => String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const isVercelHostname = (hostname = "") => hostname === "vercel.app" || hostname.endsWith(".vercel.app");
+
+const getFrontendResetUrl = (req, email, code) => {
+    const encodedEmail = String(email || "");
+    const encodedCode = String(code || "");
+    const configuredResetOrigin = String(process.env.APP_RESET_URL || "").trim();
+    const productionVercelOrigin = String(
+        process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || ""
+    ).trim();
+    let baseOrigin = configuredResetOrigin || getWebOrigin(req) || "http://localhost:8082";
+
+    // A retired preview/alias in APP_RESET_URL produces Vercel's
+    // DEPLOYMENT_NOT_FOUND page. In Vercel production, prefer the project's
+    // canonical production alias when the configured URL is a different
+    // vercel.app hostname. Custom domains remain explicitly configurable.
+    if (configuredResetOrigin && productionVercelOrigin) {
+        try {
+            const configuredUrl = new URL(configuredResetOrigin);
+            const productionUrl = new URL(/^https?:\/\//i.test(productionVercelOrigin)
+                ? productionVercelOrigin
+                : `https://${productionVercelOrigin}`);
+            if (isVercelHostname(configuredUrl.hostname) && configuredUrl.hostname !== productionUrl.hostname) {
+                baseOrigin = productionUrl.origin;
+                console.warn("Ignoring stale APP_RESET_URL Vercel hostname in favor of VERCEL_PROJECT_PRODUCTION_URL.");
+            }
+        } catch {
+            // URL validation below supplies a safe error path for an invalid
+            // configuration without exposing reset details to the requester.
+        }
+    }
+
+    baseOrigin = baseOrigin.replace(/\/$/, "");
+    const resetUrl = new URL(
+        /^https?:\/\//i.test(baseOrigin) ? baseOrigin : `https://${baseOrigin}`
+    );
+    if (!resetUrl.pathname.endsWith("/reset-password")) {
+        resetUrl.pathname = `${resetUrl.pathname.replace(/\/$/, "")}/reset-password`;
+    }
+    resetUrl.searchParams.set("email", encodedEmail);
+    resetUrl.searchParams.set("code", encodedCode);
+    resetUrl.searchParams.set("token", encodedCode);
+    return resetUrl.toString();
+};
+
+const buildPasswordResetEmail = ({ username, expiryMinutes, resetUrl }) => {
+    const safeUsername = escapeHtml(username || "there");
+    const safeResetUrl = escapeHtml(resetUrl || "");
+    const safeExpiryMinutes = Number(expiryMinutes || OTP_EXPIRY_MINUTES) || OTP_EXPIRY_MINUTES;
+    const hostedLogoUrl = escapeHtml(process.env.EMAIL_LOGO_URL || "");
+    const logoMarkup = hostedLogoUrl
+        ? `<img src="${hostedLogoUrl}" alt="${APP_NAME}" width="56" height="56" style="display:block;max-width:56px;height:56px;border-radius:14px;" />`
+        : `<div role="img" aria-label="${APP_NAME}" style="width:56px;height:56px;border-radius:14px;background:#1c4d8d;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:30px;line-height:56px;font-weight:700;text-align:center;">M</div>`;
+    const subject = `${APP_NAME}: ${username || "there"} Password Reset`;
+    const text = [
+        `${APP_NAME}: ${username || "there"} Password Reset`,
+        `We have received a request to reset the password for your account ${username || "there"}.`,
+        "Here is your password reset link:",
+        resetUrl || "",
+        `This code expires in ${safeExpiryMinutes} minutes.`,
+        `- Team ${APP_NAME}`,
+    ].join("\n\n");
+    const html = `
+        <div style="margin:0;padding:32px 16px;background:#f4f7fb;font-family:Arial,Helvetica,sans-serif;color:#16375d;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;margin:0 auto;border-collapse:separate;border-spacing:0;background:#ffffff;border:1px solid #dfeaf8;border-radius:18px;overflow:hidden;">
+                <tr>
+                    <td style="padding:24px 28px 0;">
+                        <div style="border:1px solid #1c4d8d;border-radius:14px;background:#f8fbff;">
+                            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                                <tr>
+                                    <td align="center" style="padding:18px 20px;">
+                                        <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                                            <tr>
+                                                <td style="padding-right:12px;">
+                                                    ${logoMarkup}
+                                                </td>
+                                                <td style="font-family:Arial,Helvetica,sans-serif;font-size:28px;line-height:1.2;font-weight:700;color:#1c4d8d;letter-spacing:0.3px;">
+                                                    ${APP_NAME}
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding:28px 32px 12px;">
+                        <p style="margin:0 0 18px;font-size:17px;line-height:1.6;color:#1d3557;">
+                            We have received a request to reset the password for your account <strong>${safeUsername}</strong>.
+                        </p>
+                        <p style="margin:0 0 18px;font-size:17px;line-height:1.6;color:#1d3557;">
+                            Here is your password reset link:
+                        </p>
+                        <div style="margin:0 auto 18px;text-align:center;">
+                            <a href="${safeResetUrl}" style="display:inline-block;background:#1c4d8d;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 24px;border-radius:999px;line-height:1.2;">Confirm Password Reset</a>
+                        </div>
+                        <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#44607b;text-align:center;">
+                            This code expires in ${safeExpiryMinutes} minutes.
+                        </p>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding:0 32px 28px;">
+                        <p style="margin:0;font-size:15px;line-height:1.6;color:#0f2954;font-style:italic;">- Team ${APP_NAME}</p>
+                    </td>
+                </tr>
+            </table>
+        </div>
+    `;
+
+    return {
+        subject,
+        text,
+        html,
+    };
+};
+
+const TERMINAL_APPLICATION_STATUSES = ["Rejected", "Withdrawn", "Hired", "Cancelled", "Position filled"];
+async function removeStoredUploads(values) {
+    const names = [...new Set(
+        values
+            .filter(Boolean)
+            .map((value) => String(value).replace(/\\/g, "/").split("/").pop())
+            .filter(Boolean)
+    )];
+
+    await Promise.all(names.map(async (name) => {
+        try {
+            await deleteStoredUpload(name);
+        } catch (error) {
+            if (error?.code !== "ENOENT") {
+                console.warn(`Failed to remove stored upload ${name}:`, error?.message || error);
+            }
+        }
+    }));
+}
+
+async function removeAzureAvatar(value) {
+    if (!value) return;
+    try {
+        await deleteAvatarFromAzure(value);
+    } catch (error) {
+        console.warn(`Failed to remove Azure avatar ${String(value)}:`, error?.message || error);
+    }
+}
+
+async function revokeSessions(userId, exceptSessionId) {
+    const query = { user: userId, active: true };
+    if (exceptSessionId) query._id = { $ne: exceptSessionId };
+    const sessions = await Session.find(query).select("_id");
+    const sessionIds = sessions.map((session) => String(session._id));
+    if (sessionIds.length) {
+        await Session.updateMany(
+            { _id: { $in: sessionIds } },
+            { $set: { active: false, endedAt: new Date() } }
+        );
+        sessionIds.forEach((sessionId) => disconnectSession(sessionId));
+    }
+    // A password change means any device that was trusted under the old
+    // password should have to prove itself with OTP again.
+    await clearTrustedDevicesForUser(userId);
+}
+
+async function getDeletionBlockers(userId) {
+    const user = await User.findById(userId).select("workerBalance employerBalance");
+    if (!user) {
+        return [{ code: "user_not_found", message: "User not found.", count: 1 }];
+    }
+
+    const [pendingPayouts, openJobs, applicantApplications, employerApplications] = await Promise.all([
+        PayoutRequest.countDocuments({ user: userId, status: { $in: ["requested", "approved", "processing"] } }),
+        Job.countDocuments({ jobPoster: userId, status: { $nin: ["Completed", "Cancelled"] } }),
+        JobApplication.countDocuments({ applicant: userId, status: { $nin: TERMINAL_APPLICATION_STATUSES } }),
+        JobApplication.countDocuments({
+            status: { $nin: TERMINAL_APPLICATION_STATUSES },
+            job: {
+                $in: await Job.find({ jobPoster: userId }).distinct("_id"),
+            },
+        }),
+    ]);
+
+    const blockers = [];
+    if ((user.workerBalance || 0) > 0) {
+        blockers.push({
+            code: "worker_balance",
+            message: "Withdraw or use your remaining worker balance before deleting the account.",
+            count: Number(user.workerBalance || 0),
+        });
+    }
+    if ((user.employerBalance || 0) > 0) {
+        blockers.push({
+            code: "employer_balance",
+            message: "Use or refund your remaining employer balance before deleting the account.",
+            count: Number(user.employerBalance || 0),
+        });
+    }
+    if (pendingPayouts > 0) {
+        blockers.push({
+            code: "pending_payouts",
+            message: "Pending payout requests must be completed or cancelled first.",
+            count: pendingPayouts,
+        });
+    }
+    if (openJobs > 0) {
+        blockers.push({
+            code: "open_jobs",
+            message: "Close or complete all active jobs before deleting the account.",
+            count: openJobs,
+        });
+    }
+    if (applicantApplications > 0) {
+        blockers.push({
+            code: "active_applications",
+            message: "Withdraw or resolve your active applications before deleting the account.",
+            count: applicantApplications,
+        });
+    }
+    if (employerApplications > 0) {
+        blockers.push({
+            code: "active_hiring",
+            message: "Resolve your active hiring pipeline before deleting the account.",
+            count: employerApplications,
+        });
+    }
+
+    return blockers;
+}
+
+export async function anonymizeAndDeleteUser(userId) {
+    const user = await User.findById(userId);
+    if (!user) {
+        return null;
+    }
+
+    const deletionStamp = new Date();
+    const storedUploads = [
+        user.avatarUrl,
+        user.resumeFileName,
+        user.resumeUrl,
+        user.verification?.identityDocument?.documentUrl,
+        user.verification?.addressDocument?.documentUrl,
+    ];
+    const suffix = `${String(user._id)}-${Date.now()}`;
+    const originalEmailKey = String(user.email || "").toLowerCase().trim();
+    user.status = "deleted";
+    user.deletedAt = deletionStamp;
+    user.redactedAt = deletionStamp;
+    user.firstName = "Deleted";
+    user.lastName = "User";
+    user.email = `deleted+${suffix}@microjobs.invalid`;
+    user.secondaryEmail = null;
+    user.secondaryEmailVerifiedAt = null;
+    user.phoneNumber = undefined;
+    user.username = `deleted_${String(user._id).slice(-12)}`;
+    user.city = undefined;
+    user.province = undefined;
+    user.barangay = undefined;
+    user.addressType = undefined;
+    user.address = undefined;
+    user.facebook = undefined;
+    user.profilePhotoName = undefined;
+    user.jobPosition = undefined;
+    user.companyName = undefined;
+    user.startDate = undefined;
+    user.endDate = undefined;
+    user.logoName = undefined;
+    user.resumeFileName = undefined;
+    user.resumeUrl = undefined;
+    user.avatarUrl = undefined;
+    user.about = undefined;
+    user.linkedin = undefined;
+    user.website = undefined;
+    user.totalExperience = undefined;
+    user.skills = [];
+    user.workExperience = [];
+    // Credentials are personal data like the fields above -- clearing them here
+    // is what keeps anonymization complete rather than leaving an identifiable
+    // trail of employers, schools, and credential IDs on a deleted account.
+    user.internships = [];
+    user.certificates = [];
+    user.verification = {
+        emailVerified: false,
+        phoneVerified: false,
+        identityVerified: false,
+        addressVerified: false,
+        identityDocument: { status: "pending" },
+        addressDocument: { status: "pending" },
+    };
+    user.workerBalance = 0;
+    user.employerBalance = 0;
+    await user.save();
+
+    await Promise.all([
+        Session.updateMany({ user: userId, active: true }, { $set: { active: false, endedAt: deletionStamp } }),
+        PushDevice.deleteMany({ user: userId }),
+        SavedJob.deleteMany({ user: userId }),
+        Notification.deleteMany({ user: userId }),
+        GovernmentIdVerification.deleteMany({ user: userId }),
+        PendingIdScan.deleteMany({ user: userId }),
+    ]);
+    await Promise.all([
+        removeStoredUploads(storedUploads),
+        removeAzureAvatar(storedUploads[0]),
+    ]);
+
+    await clearPhoneVerificationCode(String(userId));
+    await clearOtpChallenges(originalEmailKey);
+    await clearUserOtpChallenges(userId);
+
+    return user;
+}
+
+const PUBLIC_USER_SELECT = "-passwordHashed -mfaSecret -mfaPendingSecret -mfaBackupCodes";
+const STANDARD_ROLES = new Set(["work", "hire", "both"]);
+const PRIVILEGED_ROLES = new Set(["admin", "superadmin"]);
+const EDITABLE_STATUSES = new Set(["active", "pending", "disabled"]);
+
+const getActorId = (req) => String(req.user?.id || req.user?.userId || "");
+const isSuperAdmin = (req) => req.user?.role === "superadmin";
+
+async function assertPrivilegedMutationAllowed(req, target, nextRole) {
+    const actorId = getActorId(req);
+    const privilegedMutation = PRIVILEGED_ROLES.has(target?.role) || PRIVILEGED_ROLES.has(nextRole);
+    if (privilegedMutation && !isSuperAdmin(req)) {
+        return { status: 403, message: "Only a superadmin can manage privileged accounts." };
+    }
+    if (actorId && actorId === String(target?._id) && nextRole && nextRole !== target.role) {
+        return { status: 403, message: "You cannot change your own role." };
+    }
+    return null;
+}
+
+async function wouldDisableLastSuperAdmin(target, nextRole, nextStatus) {
+    if (target.role !== "superadmin") return false;
+    if (nextRole === "superadmin" && nextStatus === "active") return false;
+    const activeSuperadmins = await User.countDocuments({ role: "superadmin", status: "active" });
+    return activeSuperadmins <= 1 && target.status === "active";
+}
+
+export async function createUserByAdmin(req, res) {
+    try {
+        const allowedKeys = new Set(["firstName", "lastName", "email", "password", "role"]);
+        const suppliedKeys = Object.keys(req.body || {});
+        if (!suppliedKeys.length || suppliedKeys.some((key) => !allowedKeys.has(key))) {
+            return res.status(400).json({ message: "First name, last name, email, temporary password, and role are required." });
+        }
+
+        const firstName = normalizeName(req.body.firstName);
+        const lastName = normalizeName(req.body.lastName);
+        const email = normalizeEmail(req.body.email);
+        const password = String(req.body.password || "");
+        const role = String(req.body.role || "").toLowerCase();
+
+        if (!isValidName(firstName) || !isValidName(lastName)) {
+            return res.status(400).json({ message: NAME_VALIDATION_MESSAGE });
+        }
+        if (!isValidEmail(email)) {
+            return res.status(400).json({ message: EMAIL_VALIDATION_MESSAGE });
+        }
+        if (!isStrongPassword(password)) {
+            return res.status(400).json({ message: PASSWORD_POLICY_MESSAGE });
+        }
+        if (!["work", "hire", "admin"].includes(role)) {
+            return res.status(400).json({ message: "Role must be worker, employer, or admin." });
+        }
+        const forbidden = getAdminUserCreationError({ actorRole: req.user?.role, newRole: role });
+        if (forbidden) return res.status(forbidden.status).json({ message: forbidden.message });
+        if (await User.exists({ email })) {
+            return res.status(409).json({ message: "Email is already registered." });
+        }
+
+        const user = new User({
+            firstName,
+            lastName,
+            email,
+            role,
+            status: "active",
+            passwordChangeRequired: true,
+            verification: { emailVerified: true },
+        });
+        await user.setPassword(password);
+        await user.save();
+        return res.status(201).json({
+            message: "Account created. The user must change the temporary password at first sign-in.",
+            user: await User.findById(user._id).select(PUBLIC_USER_SELECT),
+        });
+    } catch (error) {
+        if (error?.code === 11000) {
+            return res.status(409).json({ message: "Email is already registered." });
+        }
+        console.error("Admin create user error:", error);
+        return res.status(500).json({ message: "Failed to create account." });
+    }
+}
+
+export async function updateUserByAdmin(req, res) {
+    try {
+        const target = await User.findById(req.params.userId);
+        if (!target) return res.status(404).json({ message: "User not found." });
+        const allowedKeys = new Set(["firstName", "lastName", "role", "status"]);
+        const suppliedKeys = Object.keys(req.body || {});
+        if (!suppliedKeys.length || suppliedKeys.some((key) => !allowedKeys.has(key))) {
+            return res.status(400).json({ message: "Only firstName, lastName, role, and status may be edited." });
+        }
+        const nextRole = req.body.role === undefined ? target.role : String(req.body.role).toLowerCase();
+        const nextStatus = req.body.status === undefined ? target.status : String(req.body.status).toLowerCase();
+        if (!STANDARD_ROLES.has(nextRole) && !PRIVILEGED_ROLES.has(nextRole)) {
+            return res.status(400).json({ message: "Invalid role value." });
+        }
+        const preservesExistingBan = target.status === "banned" && nextStatus === "banned";
+        if (!EDITABLE_STATUSES.has(nextStatus) && !preservesExistingBan) {
+            return res.status(400).json({ message: "Invalid status value." });
+        }
+        const activeSuperadminCount = target.role === "superadmin" ? await User.countDocuments({ role: "superadmin", status: "active" }) : 0;
+        const forbidden = getAdminUserMutationError({ actorRole: req.user?.role, actorId: getActorId(req), targetId: String(target._id), targetRole: target.role, nextRole, nextStatus, activeSuperadminCount });
+        if (forbidden) return res.status(forbidden.status).json({ message: forbidden.message });
+        if (req.body.firstName !== undefined) {
+            const value = normalizeName(req.body.firstName);
+            if (!isValidName(value)) return res.status(400).json({ message: NAME_VALIDATION_MESSAGE });
+            target.firstName = value;
+        }
+        if (req.body.lastName !== undefined) {
+            const value = normalizeName(req.body.lastName);
+            if (!isValidName(value)) return res.status(400).json({ message: NAME_VALIDATION_MESSAGE });
+            target.lastName = value;
+        }
+        target.role = nextRole;
+        target.status = nextStatus;
+        if (nextStatus === 'active') {
+            target.bannedAt = null;
+            target.bannedBy = null;
+            target.banReason = null;
+        }
+        await target.save();
+        return res.status(200).json({ message: "User updated.", user: await User.findById(target._id).select(PUBLIC_USER_SELECT) });
+    } catch (error) {
+        console.error("Admin update user error:", error);
+        return res.status(500).json({ message: "Failed to update user." });
+    }
+}
+
+export async function changeInitialPassword(req, res) {
+    try {
+        const userId = getActorId(req);
+        const currentPassword = String(req.body?.currentPassword || "");
+        const newPassword = String(req.body?.newPassword || "");
+        const user = await User.findById(userId).select("+passwordHashed passwordChangeRequired");
+        if (!user) return res.status(404).json({ message: "User not found." });
+        if (!user.passwordChangeRequired) return res.status(409).json({ message: "An initial password change is not required." });
+        if (!(await user.validatePassword(currentPassword))) return res.status(400).json({ message: "Temporary password is incorrect." });
+        if (!isStrongPassword(newPassword)) return res.status(400).json({ message: PASSWORD_POLICY_MESSAGE });
+        if (await user.validatePassword(newPassword)) return res.status(400).json({ message: "Choose a password different from the temporary password." });
+        await user.setPassword(newPassword);
+        user.passwordChangeRequired = false;
+        await user.save();
+        const currentSessionId = String(req.user?.sessionId || "");
+        await Session.updateMany(
+            { user: user._id, active: true, ...(currentSessionId ? { _id: { $ne: currentSessionId } } : {}) },
+            { $set: { active: false, endedAt: new Date() } },
+        );
+        await clearTrustedDevicesForUser(user._id);
+        return res.status(200).json({ message: "Password changed successfully." });
+    } catch (error) {
+        console.error("Initial password change error:", error);
+        return res.status(500).json({ message: "Failed to change password." });
+    }
+}
+
+export async function getUserList(req, res) {
+    try {
+        const users = await User.find({}).select(
+            "-passwordHashed -mfaSecret -mfaPendingSecret -mfaBackupCodes"
+        );
+        res.status(200).json(users);
+    } catch {
+        res.status(500).json({ message: "Failed to retrieve users." });
+    }
+}
+
+export async function getPrivilegedUsers(req, res) {
+    try {
+        const users = await User.find({ role: { $in: ["admin", "superadmin"] } }).select(
+            "-passwordHashed -mfaSecret -mfaPendingSecret -mfaBackupCodes"
+        );
+        res.status(200).json(users);
+    } catch {
+        res.status(500).json({ message: "Failed to retrieve admin users." });
+    }
+}
+
+export async function updateUserStatus(req, res) {
+    try {
+        const { userId } = req.params;
+        const { status } = req.body || {};
+        const allowedStatus = ["active", "pending", "disabled"];
+        if (!allowedStatus.includes(status)) {
+            return res.status(400).json({ message: "Invalid status value." });
+        }
+
+        const target = await User.findById(userId);
+        if (!target) {
+            return res.status(404).json({ message: "User not found." });
+        }
+        const forbidden = await assertPrivilegedMutationAllowed(req, target, target.role);
+        if (forbidden) return res.status(forbidden.status).json({ message: forbidden.message });
+        if (getActorId(req) === String(target._id) && status !== "active") {
+            return res.status(403).json({ message: "You cannot disable your own account." });
+        }
+        if (await wouldDisableLastSuperAdmin(target, target.role, status)) {
+            return res.status(409).json({ message: "The last active superadmin cannot be disabled." });
+        }
+        target.status = status;
+        if (status === 'active') {
+            target.bannedAt = null;
+            target.bannedBy = null;
+            target.banReason = null;
+        }
+        await target.save();
+        const updated = await User.findById(target._id).select(PUBLIC_USER_SELECT);
+        return res.status(200).json({ message: "User status updated.", user: updated });
+    } catch (error) {
+        console.error("Update user status error:", error);
+        return res.status(500).json({ message: "Failed to update user status." });
+    }
+}
+
+export async function deleteUser(req, res) {
+    try {
+        const { userId } = req.params;
+        const target = await User.findById(userId);
+        if (!target) {
+            return res.status(404).json({ message: "User not found." });
+        }
+        if (getActorId(req) === String(target._id)) {
+            return res.status(403).json({ message: "You cannot delete your own account." });
+        }
+        const forbidden = await assertPrivilegedMutationAllowed(req, target, target.role);
+        if (forbidden) return res.status(forbidden.status).json({ message: forbidden.message });
+        if (await wouldDisableLastSuperAdmin(target, target.role, "deleted")) {
+            return res.status(409).json({ message: "The last active superadmin cannot be deleted." });
+        }
+        const blockers = await getDeletionBlockers(userId);
+        if (blockers.length > 0) {
+            return res.status(400).json({ message: "User cannot be deleted until blockers are resolved.", blockers });
+        }
+
+        const deleted = await anonymizeAndDeleteUser(userId);
+        return res.status(200).json({ message: "User deleted successfully.", user: deleted });
+    } catch (error) {
+        console.error("Delete user error:", error);
+        return res.status(500).json({ message: "Failed to delete user." });
+    }
+}
+
+function normalizeProfileUrl(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^https?:\/\//i.test(raw)) return null;
+    const candidate = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    try {
+        const parsed = new URL(candidate);
+        const isLocalHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+        if (parsed.protocol !== "https:" && !isLocalHttp) return null;
+        return parsed.toString();
+    } catch {
+        return null;
+    }
+}
+
+const PROFILE_STRING_LIMITS = {
+    firstName: 30,
+    lastName: 30,
+    city: 100,
+    province: 100,
+    barangay: 100,
+    addressType: 10,
+    address: 300,
+    phoneNumber: 32,
+    facebook: 300,
+    profilePhotoName: 255,
+    jobPosition: 100,
+    companyName: 120,
+    startDate: 40,
+    endDate: 40,
+    logoName: 255,
+    about: 2000,
+    linkedin: 300,
+    website: 300,
+    totalExperience: 50,
+};
+
+export async function updateProfile(req, res) {
+    try {
+        const userId = req.user?.id || req.user?.userId;
+        if (!userId) {
+            return res.status(401).json({ message: "Authentication required." });
+        }
+
+        const existingUser = await User.findById(userId).select(
+            "phoneNumber role city province barangay verification.phoneVerified"
+        );
+        if (!existingUser) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        const requestBody = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+            ? req.body
+            : null;
+        if (!requestBody) {
+            return res.status(400).json({ message: "Profile update must be a JSON object." });
+        }
+
+        if (Object.prototype.hasOwnProperty.call(requestBody, "email")) {
+            return res.status(400).json({
+                message: "Email cannot be changed from profile settings. A verified email-change flow is required.",
+            });
+        }
+
+        const allowed = [
+            "firstName",
+            "lastName",
+            "city",
+            "province",
+            "barangay",
+            "addressType",
+            "address",
+            "phoneNumber",
+            "facebook",
+            "jobPosition",
+            "companyName",
+            "startDate",
+            "endDate",
+            "about",
+            "linkedin",
+            "website",
+            "totalExperience",
+            "hideHiredCandidates",
+            // Note: projectsCompleted, jobsApplied, and successRate are auto-calculated
+        ];
+        const allowedSet = new Set(allowed);
+        const unsupportedFields = Object.keys(requestBody).filter((key) => !allowedSet.has(key) && key !== "email");
+        if (unsupportedFields.length) {
+            return res.status(400).json({ message: `Unsupported profile field: ${unsupportedFields[0]}.` });
+        }
+        if (!Object.keys(requestBody).some((key) => allowedSet.has(key))) {
+            return res.status(400).json({ message: "No supported profile fields were provided." });
+        }
+
+        const updates = {};
+        const unset = {};
+        for (const key of allowed) {
+            if (requestBody[key] !== undefined) {
+                if (key !== "hideHiredCandidates" && typeof requestBody[key] !== "string") {
+                    return res.status(400).json({ message: `${key} must be a string.` });
+                }
+                const value = typeof requestBody[key] === "string"
+                    ? requestBody[key].trim()
+                    : requestBody[key];
+                const maxLength = PROFILE_STRING_LIMITS[key];
+                if (typeof value === "string" && maxLength && value.length > maxLength) {
+                    return res.status(400).json({ message: `${key} must be ${maxLength} characters or fewer.` });
+                }
+                if (value === "") {
+                    if (key === "firstName" || key === "lastName") {
+                        return res.status(400).json({ message: `${key} is required.` });
+                    }
+                    unset[key] = "";
+                } else {
+                    updates[key] = value;
+                }
+            }
+        }
+
+        if (updates.firstName !== undefined) {
+            updates.firstName = normalizeName(updates.firstName);
+            if (!isValidName(updates.firstName)) {
+                return res.status(400).json({ message: NAME_VALIDATION_MESSAGE });
+            }
+        }
+        if (updates.lastName !== undefined) {
+            updates.lastName = normalizeName(updates.lastName);
+            if (!isValidName(updates.lastName)) {
+                return res.status(400).json({ message: NAME_VALIDATION_MESSAGE });
+            }
+        }
+        if (updates.phoneNumber !== undefined) {
+            updates.phoneNumber = normalizePhone(updates.phoneNumber);
+            if (updates.phoneNumber && !isValidPhone(updates.phoneNumber)) {
+                return res.status(400).json({ message: PHONE_VALIDATION_MESSAGE });
+            }
+        }
+        if (updates.addressType !== undefined && !["home", "office", "place"].includes(updates.addressType)) {
+            return res.status(400).json({ message: "addressType must be home, office, or place." });
+        }
+        const locationFields = ["province", "city", "barangay"];
+        if (locationFields.some((field) => Object.prototype.hasOwnProperty.call(requestBody, field))) {
+            const nextLocationValue = (field) => {
+                if (Object.prototype.hasOwnProperty.call(unset, field)) return "";
+                if (updates[field] !== undefined) return String(updates[field]).trim();
+                return String(existingUser[field] || "").trim();
+            };
+            const nextProvince = nextLocationValue("province");
+            const nextCity = nextLocationValue("city");
+            const nextBarangay = nextLocationValue("barangay");
+            if (nextCity && !nextProvince) {
+                return res.status(400).json({ message: "Select a province before selecting a city or municipality." });
+            }
+            if (nextBarangay && !nextCity) {
+                return res.status(400).json({ message: "Select a city or municipality before selecting a barangay." });
+            }
+        }
+        for (const urlField of ["facebook", "linkedin", "website"]) {
+            if (updates[urlField] === undefined) continue;
+            const normalizedUrl = normalizeProfileUrl(updates[urlField]);
+            if (!normalizedUrl) {
+                return res.status(400).json({ message: `${urlField} must be a valid HTTPS URL.` });
+            }
+            updates[urlField] = normalizedUrl;
+        }
+        if (updates.hideHiredCandidates !== undefined && typeof updates.hideHiredCandidates !== "boolean") {
+            return res.status(400).json({ message: "hideHiredCandidates must be a boolean." });
+        }
+        if (
+            updates.hideHiredCandidates !== undefined &&
+            !["hire", "both"].includes(String(existingUser.role || "").toLowerCase())
+        ) {
+            return res.status(403).json({ message: "Employer access is required to update this setting." });
+        }
+
+        const existingPhone = normalizePhone(existingUser.phoneNumber || "");
+        const incomingPhoneProvided = updates.phoneNumber !== undefined;
+        const incomingPhoneCleared = Object.prototype.hasOwnProperty.call(unset, "phoneNumber");
+        const incomingPhone = incomingPhoneCleared ? "" : (incomingPhoneProvided ? updates.phoneNumber : existingPhone);
+        const phoneChanged = incomingPhone !== existingPhone;
+
+        if (phoneChanged) {
+            updates["verification.phoneVerified"] = false;
+            await clearPhoneVerificationCode(String(userId));
+        }
+
+        // Auto-calculate job statistics from JobApplication collection
+        const [jobsApplied, jobsCompleted] = await Promise.all([
+            JobApplication.countDocuments({ applicant: userId }),
+            JobApplication.countDocuments({ applicant: userId, status: 'Hired' }),
+        ]);
+        const successRate = jobsApplied > 0 
+            ? `${Math.round((jobsCompleted / jobsApplied) * 100)}%` 
+            : '0%';
+
+        // Add calculated stats to updates
+        updates.jobsApplied = jobsApplied;
+        updates.projectsCompleted = jobsCompleted;
+        updates.successRate = successRate;
+
+        const updateOps = { $set: updates };
+        if (Object.keys(unset).length) {
+            updateOps.$unset = unset;
+        }
+
+        const user = await User.findByIdAndUpdate(userId, updateOps, {
+            returnDocument: "after",
+            runValidators: true,
+        }).select(
+            "firstName lastName email phoneNumber role city province barangay addressType address facebook profilePhotoName jobPosition companyName startDate endDate logoName avatarUrl resumeUrl resumeFileName about linkedin website totalExperience skills workExperience internships certificates projectsCompleted jobsApplied successRate hideHiredCandidates verification"
+        );
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        return res.status(200).json({ user });
+    } catch (error) {
+        console.error("Update profile error:", error);
+        if (error?.name === "ValidationError") {
+            return res.status(400).json({ message: error.message || "Invalid profile data." });
+        }
+        if (error?.name === "CastError") {
+            return res.status(400).json({ message: "Invalid profile data type." });
+        }
+        if (error?.code === 11000) {
+            const field = Object.keys(error.keyValue)[0];
+            let message = `${field} is already in use.`;
+            if (field === 'phoneNumber') {
+                message = "This phone number is already in use. Try a different number.";
+            } else if (field === 'email') {
+                message = "This email is already in use. Try a different email.";
+            }
+            return res.status(409).json({ message });
+        }
+        return res.status(500).json({ message: "Failed to update profile." });
+    }
+}
+
+// Keep compatibility with authRoutes expecting updateMe.
+export const updateMe = updateProfile;
+
+const normalizeViewerRole = (value) => {
+    if (value === "employer" || value === "hire") return "employer";
+    return "worker";
+};
+
+const toRatingSummary = (completedCount, totalCount) => {
+    const safeTotal = Number(totalCount) || 0;
+    const safeCompleted = Number(completedCount) || 0;
+    const percentage = safeTotal > 0 ? Math.round((safeCompleted / safeTotal) * 100) : 0;
+    return {
+        percentage,
+        stars: Number((percentage / 20).toFixed(1)),
+        completedCount: safeCompleted,
+        totalCount: safeTotal,
+    };
+};
+
+const isProfileFullyVerified = (verification) => (
+    verification?.emailVerified === true
+    && verification?.phoneVerified === true
+    && verification?.identityDocument?.status === "complete"
+    && verification?.addressDocument?.status === "complete"
+);
+
+export async function getPublicProfile(req, res) {
+    try {
+        const requesterId = req.user?.id || req.user?.userId;
+        const userId = resolvePublicId(req.params?.userId);
+        const viewer = normalizeViewerRole(String(req.query?.viewAs || "").toLowerCase());
+
+        if (!requesterId) {
+            return res.status(401).json({ message: "Authentication required." });
+        }
+        if (!userId) {
+            return res.status(400).json({ message: "User id is required." });
+        }
+
+        const user = await User.findById(userId).select(
+            "firstName lastName role city province about jobPosition linkedin website totalExperience companyName avatarUrl skills workExperience internships certificates jobsApplied projectsCompleted successRate hideHiredCandidates verification"
+        );
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        // Admin/Support accounts are platform staff and have no public profile.
+        // Answer with 404 so support conversations cannot be used to browse or
+        // enumerate administrator accounts.
+        const staffAccessError = getPublicProfileAccessError({
+            targetRole: user.role,
+            requesterRole: req.user?.role,
+            targetId: user._id,
+            requesterId: requesterId,
+        });
+        if (staffAccessError) {
+            return res.status(staffAccessError.status).json({ message: staffAccessError.message });
+        }
+
+        const [workerAppliedCount, workerHiredCount, postedJobs] = await Promise.all([
+            JobApplication.countDocuments({ applicant: user._id }),
+            JobApplication.countDocuments({ applicant: user._id, status: "Hired" }),
+            Job.find({ jobPoster: user._id }).select("_id"),
+        ]);
+        const postedJobIds = postedJobs.map((job) => job._id);
+        const [employerApplicantsCount, employerHiredCount] = postedJobIds.length
+            ? await Promise.all([
+                JobApplication.countDocuments({ job: { $in: postedJobIds } }),
+                JobApplication.countDocuments({ job: { $in: postedJobIds }, status: "Hired" }),
+            ])
+            : [0, 0];
+
+        const workerPerformance = toRatingSummary(workerHiredCount, workerAppliedCount);
+        const employerPerformance = toRatingSummary(employerHiredCount, employerApplicantsCount);
+        const selectedPerformance = viewer === "employer" ? employerPerformance : workerPerformance;
+        const reviewRating = await getReviewSummary(user._id, viewer);
+        const employerHiringStatsHidden = user.hideHiredCandidates !== false;
+
+        return res.status(200).json({
+            profile: {
+                id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                role: user.role,
+                city: user.city,
+                province: user.province,
+                about: user.about,
+                jobPosition: user.jobPosition,
+                linkedin: user.linkedin,
+                website: user.website,
+                totalExperience: user.totalExperience,
+                companyName: user.companyName,
+                avatarUrl: user.avatarUrl,
+                // A public profile exposes only the completed state, never the
+                // sensitive documents or individual verification details.
+                isFullyVerified: isProfileFullyVerified(user.verification),
+                skills: Array.isArray(user.skills) ? user.skills : [],
+                workExperience: Array.isArray(user.workExperience) ? user.workExperience : [],
+                // Credentials are deliberately public: they exist to be shown to
+                // employers, and the "Public View" of a profile is where that
+                // happens. Same defensive [] default as the two above so the
+                // client never has to guard against undefined.
+                internships: Array.isArray(user.internships) ? user.internships : [],
+                certificates: Array.isArray(user.certificates) ? user.certificates : [],
+            },
+            rating: {
+                viewAs: viewer,
+                hidden: false,
+                stars: reviewRating.averageRating,
+                averageRating: reviewRating.averageRating,
+                totalReviews: reviewRating.totalReviews,
+                percentage: reviewRating.percentage,
+                ratingBreakdown: reviewRating.ratingBreakdown,
+                completedCount: selectedPerformance.completedCount,
+                totalCount: selectedPerformance.totalCount,
+            },
+            stats: {
+                worker: {
+                    jobsApplied: workerAppliedCount,
+                    projectsCompleted: workerHiredCount,
+                    successRate: workerPerformance.percentage,
+                },
+                employer: {
+                    jobsPosted: postedJobIds.length,
+                    totalApplicants: employerApplicantsCount,
+                    hires: employerHiringStatsHidden ? null : employerHiredCount,
+                    hiresHidden: employerHiringStatsHidden,
+                    successRate: employerHiringStatsHidden ? null : employerPerformance.percentage,
+                },
+            },
+        });
+    } catch (error) {
+        console.error("Get public profile error:", error);
+        return res.status(500).json({ message: "Failed to load profile." });
+    }
+}
+
+export async function sendOtp(req, res) {
+    try {
+        const { email } = req.body;
+        const normalizedEmail = String(email || "").toLowerCase().trim();
+        if (!normalizedEmail) {
+            return res.status(400).json({ message: "Email is required." });
+        }
+
+        let user = null;
+        let userLookupFailed = false;
+        try {
+            user = await User.findOne({ email: normalizedEmail }).select("firstName");
+        } catch (lookupError) {
+            userLookupFailed = true;
+            const reason = lookupError?.message ? ` ${lookupError.message}` : "";
+            console.warn(`Send OTP user lookup failed; continuing without lookup.${reason}`.trim());
+        }
+
+        // Keep existing "not found" behavior when lookup succeeds.
+        if (!user && !userLookupFailed) {
+            return res.status(200).json({ message: OTP_GENERIC_MESSAGE });
+        }
+
+        const { code } = await issueOtpChallenge({ purpose: "email-verification", subject: normalizedEmail, user: user?._id });
+
+        const transporter = getEmailTransporter();
+        if (!transporter) {
+            if (process.env.NODE_ENV === "production") {
+                return res.status(500).json({ message: "Email service is not configured." });
+            }
+            // The code goes to the server log, never into the response body.
+            // Returning it to the caller made this endpoint a complete account
+            // takeover on any non-production deploy: request a code for any
+            // address, read it out of the JSON, and verify it. The test harness
+            // reads it through /auth/debug/signup-otp instead.
+            console.warn(`SMTP is not configured. Development OTP for …${normalizedEmail.slice(-6)}: ${code}`);
+            rememberTestOtpCode("email-verification", normalizedEmail, code);
+            return res.status(200).json({ message: OTP_GENERIC_MESSAGE });
+        }
+
+        const fromAddress = getMailFrom();
+        const displayName = user?.firstName || "there";
+        const subject = "MicroJobs email verification";
+        const text = `Hi ${displayName},\n\nUse this code to verify your email for MicroJobs: ${code}\n\nIf you did not request this, you can ignore this message.`;
+        const html = `
+            <p>Hi ${displayName},</p>
+            <p>Use this code to verify your email for MicroJobs:</p>
+            <p style="font-size: 20px; font-weight: bold; letter-spacing: 2px;">${code}</p>
+            <p>If you did not request this, you can ignore this message.</p>
+        `;
+
+        await transporter.sendMail({
+            from: `MicroJobs <${fromAddress}>`,
+            to: normalizedEmail,
+            subject,
+            text,
+            html,
+        });
+
+        rememberTestOtpCode("email-verification", normalizedEmail, code);
+        return res.status(200).json({ message: OTP_GENERIC_MESSAGE });
+    } catch (error) {
+        console.error("Send OTP error:", error);
+        const detail = error?.message ? ` ${error.message}` : "";
+        return res.status(500).json({ message: `Failed to send OTP.${detail}`.trim() });
+    }
+}
+
+export async function verifyOtp(req, res) {
+    try {
+        const { email, code } = req.body;
+
+        if (!email || !code) {
+            return res.status(400).json({ message: "Email and code are required." });
+        }
+
+        const key = email.toLowerCase().trim();
+        const verification = await verifyOtpChallenge({ purpose: "email-verification", subject: key, code, consume: true });
+        if (!verification.ok) return res.status(verification.reason === "attempts" ? 429 : 400).json({ message: verification.reason === "attempts" ? "Too many invalid attempts. Request a new OTP." : "OTP not found, invalid, or expired." });
+
+        const user = await User.findOne({ email: key });
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        // This endpoint exists to complete *signup* email verification, so it
+        // may only ever promote `pending` -> `active`. It used to assign
+        // `status = "active"` unconditionally, which made every admin ban,
+        // disable and soft-delete reversible by the account's own owner: send
+        // yourself a code, verify it, and the account is live again with a
+        // fresh session. These statuses and messages mirror
+        // AuthController.loginUser so both entry points agree.
+        if (user.status === "disabled") {
+            return res.status(401).json({ message: "Account is disabled. Contact an admin." });
+        }
+        if (user.status === "banned") {
+            return res.status(401).json({ message: "Account is banned. Contact support." });
+        }
+        if (user.status === "deleted") {
+            return res.status(401).json({ message: "Account has been deleted." });
+        }
+
+        const wasPending = user.status === "pending";
+        user.verification = user.verification || {};
+        user.verification.emailVerified = true;
+        if (wasPending) {
+            user.status = "active";
+        }
+        await user.save();
+
+        // Only a genuine signup completion gets a session. For an account that
+        // is already active, confirming the mailbox is not an authentication
+        // factor on its own -- it proves control of the email, not of the
+        // password or of an enrolled authenticator. This path used to mint a
+        // full session *and* a 30-day OTP-skipping trusted device for any
+        // account, which bypassed MFA outright (MFA can only be enrolled by an
+        // already-active account, so it could never be `pending` here) and
+        // handed a live session to anyone able to read one email. Such callers
+        // must go through /auth/login.
+        if (!wasPending) {
+            return res.status(200).json({ message: "Email verified.", emailVerified: true });
+        }
+
+        const authSession = await createSessionWithTokens(req, user);
+        setSessionCookies(res, {
+            refreshToken: authSession.refreshToken,
+            sessionId: authSession.sessionId,
+            accessToken: authSession.accessToken,
+            accessTokenExpiresAt: authSession.accessTokenExpiresAt,
+            expiresAt: authSession.expiresAt,
+            csrfToken: crypto.randomBytes(24).toString("hex"),
+        });
+
+        // The device that just completed signup verification is trusted
+        // immediately, so the very next login on it skips a second OTP.
+        const trustedDevice = await issueTrustedDevice(user, {
+            ip: req.ip || req.headers["x-forwarded-for"] || "",
+            label: req.get("User-Agent") || "",
+        });
+        setTrustedDeviceCookie(res, trustedDevice.token, trustedDevice.expiresAt);
+
+        return res.status(200).json({
+            message: "Email verified and login successful.",
+            ...buildAuthTokensPayload(req, authSession),
+            ...(isNativeAuthRequest(req) || isBearerAuthRequest(req)
+                ? { trustedDeviceToken: trustedDevice.token, trustedDeviceExpiresAt: trustedDevice.expiresAt }
+                : {}),
+            user: {
+                id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                phoneNumber: user.phoneNumber,
+                email: user.email,
+                role: user.role,
+                passwordChangeRequired: Boolean(user.passwordChangeRequired),
+            },
+        });
+    } catch (error) {
+        console.error("Verify OTP error:", error);
+        return res.status(500).json({ message: "Failed to verify OTP." });
+    }
+}
+
+export async function requestPasswordResetOtp(req, res) {
+    try {
+        const { email } = req.body || {};
+        const normalizedEmail = String(email || "").toLowerCase().trim();
+
+        if (!normalizedEmail) {
+            return res.status(400).json({ message: "Email is required." });
+        }
+
+        const user = await User.findOne({ email: normalizedEmail }).select("firstName username email");
+
+        // Every path below returns the same 200 + generic message. An unknown
+        // address simply skips the OTP and the email; the caller cannot tell
+        // that apart from a successful send, so the endpoint is not an
+        // account-existence oracle. Failures are logged, never reflected back.
+        if (user) {
+            try {
+                const { code } = await issueOtpChallenge({ purpose: "password-reset", subject: normalizedEmail, user: user._id });
+
+                const transporter = getEmailTransporter();
+                if (!transporter) {
+                    console.error("Password reset requested but SMTP is not configured.");
+                } else {
+                    const username = user.username || user.firstName || normalizedEmail.split("@")[0];
+                    const resetUrl = getFrontendResetUrl(req, normalizedEmail, code);
+                    const emailContent = buildPasswordResetEmail({
+                        username,
+                        expiryMinutes: OTP_EXPIRY_MINUTES,
+                        resetUrl,
+                    });
+
+                    await transporter.sendMail({
+                        from: getPasswordResetEmailFrom(),
+                        to: normalizedEmail,
+                        subject: emailContent.subject,
+                        text: emailContent.text,
+                        html: emailContent.html,
+                    });
+                }
+            } catch (sendError) {
+                // Swallowed deliberately: surfacing this would reveal that the
+                // account exists. The user sees the same message either way.
+                console.error("Request password reset OTP send error:", sendError);
+            }
+        }
+
+        return res.status(200).json({ message: PASSWORD_RESET_GENERIC_MESSAGE });
+    } catch (error) {
+        console.error("Request password reset OTP error:", error);
+        return res.status(500).json({ message: "Failed to send password reset OTP." });
+    }
+}
+
+export async function verifyPasswordResetOtp(req, res) {
+    try {
+        const { email, code } = req.body || {};
+        const normalizedEmail = String(email || "").toLowerCase().trim();
+        const normalizedCode = String(code || "").trim();
+
+        if (!normalizedEmail || !/^\d{6}$/.test(normalizedCode)) {
+            return res.status(400).json({ message: "Email and a valid 6-digit code are required." });
+        }
+
+        const verification = await verifyOtpChallenge({ purpose: "password-reset", subject: normalizedEmail, code: normalizedCode, markVerified: true });
+        if (!verification.ok) return res.status(verification.reason === "attempts" ? 429 : 400).json({ message: verification.reason === "attempts" ? "Too many invalid attempts. Request a new reset code." : "Reset code not found, invalid, or expired." });
+        return res.status(200).json({ message: "Reset code verified." });
+    } catch (error) {
+        console.error("Verify password reset OTP error:", error);
+        return res.status(500).json({ message: "Failed to verify reset code." });
+    }
+}
+
+export async function resetPasswordWithOtp(req, res) {
+    try {
+        const { email, code, newPassword } = req.body || {};
+        const normalizedEmail = String(email || "").toLowerCase().trim();
+        const normalizedCode = String(code || "").trim();
+
+        if (!normalizedEmail || !normalizedCode || !newPassword) {
+            return res.status(400).json({ message: "Email, code, and new password are required." });
+        }
+
+        if (!isStrongPassword(newPassword)) {
+            return res.status(400).json({ message: PASSWORD_POLICY_MESSAGE });
+        }
+
+        const verification = await verifyOtpChallenge({ purpose: "password-reset", subject: normalizedEmail, code: normalizedCode, consume: true });
+        if (!verification.ok || !verification.challenge?.verifiedAt) return res.status(400).json({ message: "Reset code not verified, invalid, or expired." });
+
+        const user = await User.findOne({ email: normalizedEmail })
+            .select('+passwordHashed +failedLoginAttempts +loginLockCount +lockUntil');
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+        if (await user.validatePassword(newPassword)) {
+            return res.status(400).json({ message: "New password must be different from the current password." });
+        }
+
+        await user.setPassword(newPassword);
+        // Completing a password reset from the account's registered inbox is
+        // proof of email ownership. A newly registered user can otherwise
+        // reset their password successfully but remain `pending`, causing the
+        // next correct sign-in to be rejected with a 401.
+        user.verification = {
+            ...(user.verification?.toObject?.() || user.verification || {}),
+            emailVerified: true,
+        };
+        if (user.status === 'pending') user.status = 'active';
+        // A password reset proves control of the registered email. Clear a
+        // lock that may have been triggered by the failed sign-in attempts
+        // which led the user here, otherwise the freshly set password is
+        // rejected with the same generic credentials message until timeout.
+        await user.clearLoginLock();
+        await user.save();
+        await revokeSessions(user._id);
+        await monitor.audit({ actor: user._id, action: "password_reset", ip: req.ip || null, userAgent: req.get?.("user-agent") || null, status: "success" });
+
+        return res.status(200).json({ message: "Password reset successful." });
+    } catch (error) {
+        console.error("Reset password with OTP error:", error);
+        return res.status(500).json({ message: "Failed to reset password." });
+    }
+}
+
+export async function requestPasswordChangeOtp(req, res) {
+    try {
+        const userId = req.user?.id || req.user?.userId;
+        const { currentPassword } = req.body || {};
+
+        if (!userId) {
+            return res.status(401).json({ message: "Authentication required." });
+        }
+        if (!currentPassword) {
+            return res.status(400).json({ message: "Current password is required." });
+        }
+
+        const user = await User.findById(userId).select("+passwordHashed +secondaryEmail +secondaryEmailVerifiedAt");
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        const matches = await user.validatePassword(currentPassword);
+        if (!matches) {
+            return res.status(401).json({ message: "Current password is incorrect." });
+        }
+        const staff = isStaffAccount(user);
+        if (staff && !hasVerifiedSecondaryEmail(user)) {
+            return res.status(409).json({ message: "Verify your secondary email in Account settings before changing your password." });
+        }
+        const emailKey = String(staff ? user.secondaryEmail : user.email).toLowerCase().trim();
+        const subjectKey = staff ? staffPasswordChangeSubject(user) : emailKey;
+        const transporter = getEmailTransporter();
+        if (staff && !transporter && process.env.NODE_ENV !== "test") {
+            return res.status(503).json({ message: "Email service is not configured." });
+        }
+        const { code } = await issueOtpChallenge({ purpose: "password-change", subject: subjectKey, user: user._id,
+            metadata: { userId: String(user._id), ...(staff ? { secondaryEmail: emailKey, secondaryEmailVerifiedAt: user.secondaryEmailVerifiedAt.toISOString() } : {}) } });
+
+        if (!transporter) {
+            if (process.env.NODE_ENV === "production") {
+                return res.status(500).json({ message: "Email service is not configured." });
+            }
+            if (!staff) console.warn("SMTP is not configured. Password-change code retained for the isolated test harness only.");
+            rememberTestOtpCode("password-change", subjectKey, code);
+            return res.status(200).json({ message: "OTP generated for development." });
+        }
+
+        const fromAddress = getMailFrom();
+        const displayName = user.firstName || "there";
+        const subject = "MicroJobs password change verification";
+        const text = `Hi ${displayName},\n\nUse this code to continue changing your MicroJobs password: ${code}\n\nThis code expires in 5 minutes. If you did not request this, please secure your account immediately.`;
+        const html = `
+            <p>Hi ${displayName},</p>
+            <p>Use this code to continue changing your MicroJobs password:</p>
+            <p style="font-size: 20px; font-weight: bold; letter-spacing: 2px;">${code}</p>
+            <p>This code expires in 5 minutes.</p>
+            <p>If you did not request this, please secure your account immediately.</p>
+        `;
+
+        await transporter.sendMail({
+            from: `MicroJobs <${fromAddress}>`,
+            to: emailKey,
+            subject,
+            text,
+            html,
+        });
+
+        return res.status(200).json({ message: "Password change OTP sent." });
+    } catch (error) {
+        console.error("Request password change OTP error:", error);
+        return res.status(500).json({ message: "Failed to send password change OTP." });
+    }
+}
+
+export async function changePasswordWithOtp(req, res) {
+    try {
+        const userId = req.user?.id || req.user?.userId;
+        const { currentPassword, code, newPassword } = req.body || {};
+
+        if (!userId) {
+            return res.status(401).json({ message: "Authentication required." });
+        }
+        if (!currentPassword || !code || !newPassword) {
+            return res.status(400).json({ message: "Current password, code, and new password are required." });
+        }
+        if (!isStrongPassword(newPassword)) {
+            return res.status(400).json({ message: PASSWORD_POLICY_MESSAGE });
+        }
+
+        const user = await User.findById(userId).select("+passwordHashed +secondaryEmail +secondaryEmailVerifiedAt");
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        const matches = await user.validatePassword(currentPassword);
+        if (!matches) {
+            return res.status(401).json({ message: "Current password is incorrect." });
+        }
+        if (await user.validatePassword(newPassword)) {
+            return res.status(400).json({ message: "New password must be different from the current password." });
+        }
+
+        const staff = isStaffAccount(user);
+        if (staff && !hasVerifiedSecondaryEmail(user)) {
+            return res.status(409).json({ message: "Verify your secondary email in Account settings before changing your password." });
+        }
+        const emailKey = staff ? staffPasswordChangeSubject(user) : String(user.email || "").toLowerCase().trim();
+        const verification = await verifyOtpChallenge({
+            purpose: "password-change",
+            subject: emailKey,
+            code: String(code || "").trim(),
+            consume: true,
+        });
+        if (!verification.ok) {
+            const status = verification.reason === "attempts" ? 429 : 400;
+            const message = verification.reason === "attempts"
+                ? "Too many invalid attempts. Request a new code."
+                : "Password change code not found, invalid, or expired.";
+            return res.status(status).json({ message });
+        }
+        if (String(verification.challenge.user || "") !== String(user._id)) {
+            return res.status(400).json({ message: "Invalid password change code." });
+        }
+        if (staff && (verification.challenge.metadata.secondaryEmail !== user.secondaryEmail
+            || verification.challenge.metadata.secondaryEmailVerifiedAt !== user.secondaryEmailVerifiedAt.toISOString())) {
+            return res.status(400).json({ message: "Secondary email changed. Request a new password change code." });
+        }
+
+        const previousPasswordHash = user.passwordHashed;
+        await user.setPassword(newPassword);
+        if (staff) {
+            const updated = await User.updateOne({ _id: user._id, role: user.role, status: 'active',
+                passwordHashed: previousPasswordHash,
+                secondaryEmail: user.secondaryEmail, secondaryEmailVerifiedAt: user.secondaryEmailVerifiedAt },
+                { $set: { passwordHashed: user.passwordHashed } });
+            if (!updated.modifiedCount) return res.status(409).json({ message: "Account security details changed. Request a new code." });
+        } else await user.save();
+        await revokeSessions(user._id, req.user?.sessionId);
+        await monitor.audit({ actor: user._id, action: "password_changed", ip: req.ip || null, userAgent: req.get?.("user-agent") || null, status: "success" });
+        return res.status(200).json({ message: "Password changed successfully." });
+    } catch (error) {
+        console.error("Change password with OTP error:", error);
+        return res.status(500).json({ message: "Failed to change password." });
+    }
+}
+
+export async function requestSelfDelete(req, res) {
+    try {
+        const userId = req.user?.id || req.user?.userId;
+        const { currentPassword, confirm } = req.body || {};
+
+        if (!userId) {
+            return res.status(401).json({ message: "Authentication required." });
+        }
+        if (!currentPassword) {
+            return res.status(400).json({ message: "Current password is required." });
+        }
+        if (String(confirm || "").trim().toUpperCase() !== "DELETE") {
+            return res.status(400).json({ message: "Confirmation must be DELETE." });
+        }
+
+        const user = await User.findById(userId).select("+passwordHashed");
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+        if (user.status === "deleted") {
+            return res.status(400).json({ message: "Account is already deleted." });
+        }
+
+        const matches = await user.validatePassword(currentPassword);
+        if (!matches) {
+            return res.status(401).json({ message: "Current password is incorrect." });
+        }
+
+        const blockers = await getDeletionBlockers(userId);
+        if (blockers.length > 0) {
+            return res.status(400).json({
+                message: "Resolve the following blockers before deleting your account.",
+                blockers,
+            });
+        }
+
+        await anonymizeAndDeleteUser(userId);
+        return res.status(200).json({ message: "Account deleted successfully." });
+    } catch (error) {
+        console.error("Request self delete error:", error);
+        return res.status(500).json({ message: "Failed to delete account." });
+    }
+}

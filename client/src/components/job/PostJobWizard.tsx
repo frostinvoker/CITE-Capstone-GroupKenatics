@@ -1,0 +1,762 @@
+import React, { useCallback, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { motionTokens, seconds } from "@/constants/motion";
+import { useTranslation } from "react-i18next";
+import { ClipboardList, FileText, Info, MapPin, WalletCards } from "lucide-react";
+import { AlertCard, AlertLayer } from "../ui";
+import { DateField } from "../ui/DateField";
+import { formatCurrency } from "../../lib/formatters";
+import { getMinimumJobPay } from "../../lib/jobCompensation";
+import { WorkDatesField } from './WorkDatesField';
+import { WorkTimePicker } from './WorkTimePicker';
+import { getWorkMinutes } from '../../lib/workTime';
+import { DailyWorkSchedule } from '../DailyWorkSchedule';
+import {
+  type FormState,
+  type JobEdit,
+  type ProvinceOption,
+  type CityOption,
+  type BarangayOption,
+  type RequiredFieldKey,
+  getJobTypeOptions,
+  getRequiredFieldLabels,
+  composeLocation,
+  parseDateInputValue,
+  formatDateInputValue,
+  validateStep,
+} from "./postJobForm";
+
+const focusField = (key: RequiredFieldKey) => {
+  requestAnimationFrame(() => {
+    const target = document.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+      `[data-field="${key}"]`
+    );
+    if (!target) return;
+    target.focus();
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+};
+
+type PostJobWizardProps = {
+  formData: FormState;
+  setFormData: React.Dispatch<React.SetStateAction<FormState>>;
+  editingJob: JobEdit | null;
+  categories: { _id: string; name: string }[];
+  provinceOptions: ProvinceOption[];
+  cityOptions: CityOption[];
+  barangayOptions: BarangayOption[];
+  isLoadingLocationData: boolean;
+  isLoadingBarangays: boolean;
+  submitting: boolean;
+  formError: string | null;
+  hasInsufficientBalanceError: boolean;
+  onSubmit: (event: React.SyntheticEvent) => void;
+  onCancel: () => void;
+  /** Clears the owner's `formError` when the error popup is dismissed. Without
+      it the popup would reopen on every render until the next submit. */
+  onDismissError: () => void;
+};
+
+const STEP_KEYS = ["job", "whereWhen", "pay", "review"] as const;
+const POSTING_FEE = 20;
+const HIGHLIGHT_FEE = 50;
+
+export default function PostJobWizard({
+  formData,
+  setFormData,
+  editingJob,
+  categories,
+  provinceOptions,
+  cityOptions,
+  barangayOptions,
+  isLoadingLocationData,
+  isLoadingBarangays,
+  submitting,
+  formError,
+  hasInsufficientBalanceError,
+  onSubmit,
+  onCancel,
+  onDismissError,
+}: PostJobWizardProps) {
+  const { t } = useTranslation("employer");
+  const { t: tc } = useTranslation("common");
+  const prefersReducedMotion = useReducedMotion();
+  const jobTypeOptions = useMemo(() => getJobTypeOptions(t), [t]);
+  const requiredFieldLabels = useMemo(() => getRequiredFieldLabels(t), [t]);
+  const [step, setStep] = useState<0 | 1 | 2 | 3>(0);
+  const [stepError, setStepError] = useState<string | null>(null);
+  // Which field the dismissed popup should hand focus back to. Held in a ref
+  // rather than focused at validation time: the popup takes focus the moment it
+  // opens, so focusing the field first only means focusing it twice and losing.
+  const pendingFieldRef = useRef<RequiredFieldKey | null>(null);
+  // The insufficient-balance case has its own dialog in PostJob.tsx with its own
+  // actions, so it is excluded here rather than shown twice.
+  const alertMessage = stepError || (hasInsufficientBalanceError ? null : formError);
+
+  const dismissAlert = useCallback(() => {
+    const field = pendingFieldRef.current;
+    pendingFieldRef.current = null;
+    setStepError(null);
+    onDismissError();
+    // Runs in a rAF, so it lands after `AlertLayer` has restored focus to
+    // whatever raised the alert -- the field wins, which is the point.
+    if (field) focusField(field);
+  }, [onDismissError]);
+
+  const selectedProvince = provinceOptions.find(
+    (item) => item.name.toLowerCase() === formData.province.trim().toLowerCase()
+  );
+  const filteredCityOptions = selectedProvince?.code
+    ? cityOptions.filter((item) => item.provinceCode === selectedProvince.code)
+    : cityOptions;
+
+  const estimatedEscrow = useMemo(() => {
+    const payPerWorker = Number(formData.minimumSalary.replace(/[^0-9]/g, "") || 0);
+    const workerCount = Number(formData.positionsNeeded || 0);
+    if (!Number.isFinite(payPerWorker) || !Number.isInteger(workerCount) || workerCount < 1) {
+      return 0;
+    }
+    return payPerWorker * workerCount * (formData.jobType === 'Recruiting' ? formData.workDates.length : 1);
+  }, [formData.minimumSalary, formData.positionsNeeded, formData.jobType, formData.workDates]);
+
+  const selectedCategoryName = categories.find((c) => c._id === formData.category)?.name || "";
+  const postingFee = editingJob ? 0 : POSTING_FEE;
+  const highlightFee = !editingJob && formData.highlighted ? HIGHLIGHT_FEE : 0;
+  const checkoutTotal = estimatedEscrow + postingFee + highlightFee;
+
+  const goNext = () => {
+    if (step === 1 && formData.jobType === 'Recruiting' && !getWorkMinutes(formData.workStartTime, formData.workEndTime)) {
+      setStepError(tc('workTime.invalid')); pendingFieldRef.current = null; return;
+    }
+    if (step === 1 && formData.jobType === 'Recruiting' && (formData.workDates.length < 2 || formData.workDates.length > 366)) {
+      setStepError(t('postJob.daily.requiredDates')); pendingFieldRef.current = null; return;
+    }
+    const missing = validateStep(step, formData);
+    if (missing.length > 0) {
+      setStepError(
+        step === 2 && formData.minimumSalary
+          ? t("postJob.errors.invalidSalary", { minimum: getMinimumJobPay(formData.jobType) })
+          : t("postJob.errors.missingFields", {
+              fields: missing.map((field) => requiredFieldLabels[field]).join(", "),
+            })
+      );
+      pendingFieldRef.current = missing[0];
+      return;
+    }
+    setStepError(null);
+    setStep((s) => (s < 3 ? ((s + 1) as 0 | 1 | 2 | 3) : s));
+  };
+
+  const goBack = () => {
+    setStepError(null);
+    setStep((s) => (s > 0 ? ((s - 1) as 0 | 1 | 2 | 3) : s));
+  };
+
+  const goToStep = (index: 0 | 1 | 2 | 3) => {
+    if (index <= step) {
+      setStepError(null);
+      setStep(index);
+    }
+  };
+
+  const handleFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    // The form still catches Enter presses for step validation, but native form
+    // submission must never post a job. Posting is deliberately reserved for the
+    // explicit button on the read-only review and checkout step below.
+    event.preventDefault();
+    if (step < 3) goNext();
+  };
+
+  const submitCheckout = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    if (step !== 3 || submitting) return;
+    onSubmit(event);
+  };
+
+  const stepMotionProps = prefersReducedMotion
+    ? {}
+    : {
+        initial: { opacity: 0, x: 16 },
+        animate: { opacity: 1, x: 0 },
+        exit: { opacity: 0, x: -16 },
+        transition: { duration: seconds(motionTokens.duration.fast) },
+      };
+
+  return (
+    <form onSubmit={handleFormSubmit} noValidate className="space-y-6">
+      {/* Centred over the viewport rather than banner-stacked at the top of the
+          form. The banner sat above the fold of a scrolling dialog body, so a
+          failed Next from halfway down the step scrolled nothing and looked
+          like the button had simply not worked.
+
+          Kept as its own instance rather than routed through `toast.error`,
+          which now centres too: only this one knows which field to hand focus
+          back to once it closes. */}
+      <AlertLayer
+        open={Boolean(alertMessage)}
+        labelledBy="post-job-error-title"
+        describedBy="post-job-error-message"
+        onDismiss={dismissAlert}
+      >
+        <AlertCard
+          title={t("postJob.errors.popupTitle")}
+          titleId="post-job-error-title"
+          message={alertMessage}
+          messageId="post-job-error-message"
+          dismissLabel={t("postJob.errors.popupDismiss")}
+          onDismiss={dismissAlert}
+        />
+      </AlertLayer>
+
+      {/* The dot is the indicator; the button around it is the tap target. The
+          dot used to be the button, which made these 10px -- the smallest
+          interactive elements in the app, and they are how you navigate back
+          through the wizard. The dot keeps its size so the stepper looks
+          unchanged. `-mx-3` absorbs the extra width so the connecting rules
+          still meet the dots. */}
+      <div className="flex items-center justify-center">
+        {STEP_KEYS.map((key, index) => (
+          <React.Fragment key={key}>
+            <button
+              type="button"
+              onClick={() => goToStep(index as 0 | 1 | 2 | 3)}
+              disabled={index > step}
+              aria-current={index === step ? "step" : undefined}
+              aria-label={t("postJob.wizard.stepAria", {
+                step: index + 1,
+                total: STEP_KEYS.length,
+                title: t(`postJob.wizard.steps.${key}.title`),
+              })}
+              className={`-mx-3 flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${
+                index < step ? "cursor-pointer" : index === step ? "" : "cursor-not-allowed"
+              }`}
+            >
+              <span
+                aria-hidden="true"
+                className={`h-2.5 w-2.5 rounded-full transition ${index <= step ? "bg-brand" : "bg-[#E5E7EB]"}`}
+              />
+            </button>
+            {index < STEP_KEYS.length - 1 && <div className="h-px w-8 shrink-0 bg-[#E5E7EB]" aria-hidden="true" />}
+          </React.Fragment>
+        ))}
+      </div>
+      <p className="text-center text-xs font-semibold uppercase tracking-[0.14em] text-brand">
+        {t("postJob.wizard.stepAria", {
+          step: step + 1,
+          total: STEP_KEYS.length,
+          title: t(`postJob.wizard.steps.${STEP_KEYS[step]}.title`),
+        })}
+      </p>
+
+      <AnimatePresence mode="wait">
+        <motion.div key={step} {...stepMotionProps}>
+          {step === 0 && (
+            <section className="space-y-5 rounded-card border border-slate-200 bg-slate-50/60 p-4 md:p-6">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-brand-600 shadow-sm ring-1 ring-slate-200">
+                  <ClipboardList size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900">{t("postJob.wizard.steps.job.title")}</h3>
+                  <p className="mt-0.5 text-sm text-slate-500">{t("postJob.wizard.steps.job.subtitle")}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label htmlFor="job-title" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.modal.fields.jobTitle.label")} <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="job-title"
+                    type="text"
+                    data-field="title"
+                    value={formData.title}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, title: e.target.value }))}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                    placeholder={t("postJob.modal.fields.jobTitle.placeholder")}
+                    maxLength={100}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="job-category" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.modal.fields.category.label")} <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="job-category"
+                    data-field="category"
+                    value={formData.category}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, category: e.target.value }))}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                    required
+                  >
+                    <option value="">{t("postJob.modal.fields.category.placeholder")}</option>
+                    {categories.map((category) => (
+                      <option key={category._id} value={category._id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="job-description" className="mb-2 block text-sm font-semibold text-slate-700">
+                  {t("postJob.description.label")} <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  id="job-description"
+                  data-field="description"
+                  value={formData.description}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, description: e.target.value }))}
+                  className="min-h-[140px] w-full rounded-xl border border-slate-200 px-4 py-3 text-sm leading-6 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
+                  placeholder={t("postJob.description.placeholder")}
+                  maxLength={3000}
+                  required
+                />
+                <p className="mt-2 text-right text-xs text-slate-400">
+                  {t("postJob.description.counter", { count: formData.description.length })}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label htmlFor="job-requirements" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.requirements.label")}{" "}
+                    <span className="font-normal text-slate-400">{t("postJob.requirements.optional")}</span>
+                  </label>
+                  <textarea
+                    id="job-requirements"
+                    value={formData.requirements}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, requirements: e.target.value }))}
+                    className="min-h-[110px] w-full rounded-xl border border-slate-200 px-4 py-3 text-sm leading-6 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
+                    placeholder={t("postJob.requirements.placeholder")}
+                  />
+                </div>
+
+                <div>
+                  <label className="flex gap-3 items-center"><input type="checkbox" checked={formData.interviewRequired} onChange={(e) => setFormData((old) => ({ ...old, interviewRequired: e.target.checked }))} />{tc("lifecycle.interviewRequired")}</label><label htmlFor="job-skills" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.skills.label")}{" "}
+                    <span className="font-normal text-slate-400">{t("postJob.skills.optional")}</span>
+                  </label>
+                  <textarea
+                    id="job-skills"
+                    value={formData.skills}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, skills: e.target.value }))}
+                    className="min-h-[110px] w-full rounded-xl border border-slate-200 px-4 py-3 text-sm leading-6 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
+                    placeholder={t("postJob.skills.placeholder")}
+                  />
+                  <p className="mt-2 text-xs text-slate-400">{t("postJob.skills.helper")}</p>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {step === 1 && (
+            <section className="space-y-5 rounded-card border border-slate-200 bg-white p-4 md:p-6">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-brand-600">
+                  <MapPin size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900">{t("postJob.wizard.steps.whereWhen.title")}</h3>
+                  <p className="mt-0.5 text-sm text-slate-500">{t("postJob.wizard.steps.whereWhen.subtitle")}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div>
+                  <label htmlFor="job-province" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.modal.location.province.label")} <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="job-province"
+                    data-field="location"
+                    value={formData.province}
+                    onChange={(e) =>
+                      setFormData((prev) => ({ ...prev, province: e.target.value, city: "", barangay: "" }))
+                    }
+                    disabled={isLoadingLocationData}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                    required
+                  >
+                    <option value="">
+                      {isLoadingLocationData
+                        ? t("postJob.modal.location.province.loading")
+                        : t("postJob.modal.location.province.placeholder")}
+                    </option>
+                    {provinceOptions.map((province) => (
+                      <option key={province.code} value={province.name}>
+                        {province.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="job-city" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.modal.location.city.label")} <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="job-city"
+                    value={formData.city}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, city: e.target.value, barangay: "" }))}
+                    disabled={isLoadingLocationData || !formData.province}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                    required
+                  >
+                    <option value="">
+                      {!formData.province
+                        ? t("postJob.modal.location.city.selectProvinceFirst")
+                        : isLoadingLocationData
+                        ? t("postJob.modal.location.city.loading")
+                        : t("postJob.modal.location.city.placeholder")}
+                    </option>
+                    {filteredCityOptions.map((city) => (
+                      <option key={city.code} value={city.name}>
+                        {city.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="job-barangay" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.modal.location.barangay.label")} <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="job-barangay"
+                    value={formData.barangay}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, barangay: e.target.value }))}
+                    disabled={isLoadingBarangays || !formData.city}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                    required
+                  >
+                    <option value="">
+                      {!formData.city
+                        ? t("postJob.modal.location.barangay.selectCityFirst")
+                        : isLoadingBarangays
+                        ? t("postJob.modal.location.barangay.loading")
+                        : t("postJob.modal.location.barangay.placeholder")}
+                    </option>
+                    {barangayOptions.map((barangay) => (
+                      <option key={barangay.code} value={barangay.name}>
+                        {barangay.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="job-address" className="mb-2 block text-sm font-semibold text-slate-700">
+                  {t("postJob.modal.location.address.label")}{" "}
+                  <span className="font-normal text-slate-400">{t("postJob.modal.location.address.optional")}</span>
+                </label>
+                <input
+                  id="job-address"
+                  type="text"
+                  value={formData.address}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, address: e.target.value }))}
+                  className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                  placeholder={t("postJob.modal.location.address.placeholder")}
+                />
+              </div>
+
+              <div className="flex items-start gap-2 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                <span>
+                  <span className="font-semibold text-slate-700">{t("postJob.modal.location.preview.label")}</span>{" "}
+                  {composeLocation(formData) || t("postJob.modal.location.preview.placeholder")}
+                </span>
+              </div>
+
+              <fieldset data-field="jobType">
+                <legend className="mb-2 block text-sm font-semibold text-slate-700">
+                  {t("postJob.modal.fields.opportunityType")} <span className="text-red-500">*</span>
+                </legend>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  {jobTypeOptions.map((option) => {
+                    const selected = formData.jobType === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => setFormData((prev) => ({ ...prev, jobType: option.value, ...(option.value === 'Recruiting' && prev.workDates.length ? { deadline: [...prev.workDates].sort().slice(-1)[0] } : {}) }))}
+                        className={`rounded-xl border p-4 text-left transition focus:outline-none focus:ring-2 focus:ring-brand-500 ${
+                          selected
+                            ? "border-brand-600 bg-brand-50 shadow-sm"
+                            : "border-slate-200 bg-white hover:border-brand-300"
+                        }`}
+                      >
+                        <span className={`block text-sm font-semibold ${selected ? "text-brand-700" : "text-slate-900"}`}>
+                          {option.label}
+                        </span>
+                        <span className="mt-1 block text-xs leading-5 text-slate-500">{option.description}</span>
+                        <span className="mt-3 block border-t border-slate-200 pt-3 text-xs leading-5 text-slate-600">
+                          <span className="font-semibold">{t("postJob.jobType.examplesLabel")}:</span> {option.examples}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {formData.jobType && !jobTypeOptions.some((option) => option.value === formData.jobType) && (
+                  <p className="mt-2 text-xs text-amber-700">
+                    {t("postJob.modal.legacyTypeWarning", { type: formData.jobType })}
+                  </p>
+                )}
+              </fieldset>
+
+              {formData.jobType === 'Recruiting' && <WorkDatesField value={formData.workDates} onChange={(workDates) => setFormData((prev) => ({ ...prev, workDates, deadline: workDates[workDates.length - 1] || '' }))} disabled={Boolean(editingJob?.hiredCount || (editingJob as JobEdit & { reservedOfferCount?: number })?.reservedOfferCount)} />}
+              {formData.jobType === 'Recruiting' && <WorkTimePicker start={formData.workStartTime} end={formData.workEndTime} rate={formData.minimumSalary} disabled={Boolean(editingJob?.hiredCount || (editingJob as JobEdit & { reservedOfferCount?: number })?.reservedOfferCount)} onChange={(field, value) => setFormData((prev) => ({ ...prev, [field]: value }))} />}
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <DateField
+                    id="job-deadline"
+                    label={t("postJob.modal.deadline.label")}
+                    dataField="deadline"
+                    required
+                    minDate={new Date()}
+                    value={formData.deadline ? parseDateInputValue(formData.deadline) : null}
+                    onChange={(next) =>
+                      setFormData((prev) => ({ ...prev, deadline: next ? formatDateInputValue(next) : "" }))
+                    }
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="job-positions" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t("postJob.modal.positions.label")}
+                  </label>
+                  <input
+                    id="job-positions"
+                    type="number"
+                    min={1}
+                    value={formData.positionsNeeded}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, positionsNeeded: e.target.value }))}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                </div>
+              </div>
+            </section>
+          )}
+
+          {step === 2 && (
+            <>
+              <section className="space-y-5 rounded-card border border-slate-200 bg-slate-50/60 p-4 md:p-6">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-brand-600 shadow-sm ring-1 ring-slate-200">
+                    <WalletCards size={20} />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900">{t("postJob.wizard.steps.pay.title")}</h3>
+                    <p className="mt-0.5 text-sm text-slate-500">{t("postJob.wizard.steps.pay.subtitle")}</p>
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="job-minimum-pay" className="mb-2 block text-sm font-semibold text-slate-700">
+                    {t(formData.jobType === 'Recruiting' ? 'postJob.daily.payLabel' : "postJob.modal.pay.label")} <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-500">
+                      ₱
+                    </span>
+                    <input
+                      id="job-minimum-pay"
+                      aria-label={t("postJob.modal.pay.ariaLabel")}
+                      type="text"
+                      data-field="salary"
+                      inputMode="numeric"
+                      value={formData.minimumSalary}
+                      onChange={(e) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          minimumSalary: e.target.value.replace(/[^0-9]/g, ""),
+                        }))
+                      }
+                      className="h-11 w-full rounded-xl border border-slate-200 pl-9 pr-4 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+                      placeholder={t("postJob.modal.pay.placeholder")}
+                      required
+                    />
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-slate-500">{t("postJob.modal.pay.helper", { minimum: getMinimumJobPay(formData.jobType) })}</p>
+                </div>
+
+                <div className="flex flex-col gap-2 rounded-card border border-brand-100 bg-brand-50 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-bold text-brand-900">
+                      {editingJob ? t("postJob.modal.walletSummary.estimatedValue") : t("postJob.modal.walletSummary.fundsNeeded")}
+                    </p>
+                    <p className="mt-0.5 text-xs text-brand-700">
+                      {t(formData.jobType === 'Recruiting' ? 'postJob.daily.formula' : "postJob.modal.walletSummary.formula", {
+                        days: formData.workDates.length,
+                        rate: formatCurrency(Number(formData.minimumSalary || 0), { maximumFractionDigits: 0 }),
+                        count: Number(formData.positionsNeeded || 0),
+                      })}
+                    </p>
+                  </div>
+                  <p className="text-2xl font-bold tracking-tight text-brand-700">
+                    {formatCurrency(estimatedEscrow, { maximumFractionDigits: 0 })}
+                  </p>
+                </div>
+
+                {!editingJob && (
+                  <div className="flex items-start gap-3 rounded-card border border-amber-200 bg-amber-50 p-4 transition hover:border-amber-300">
+                    <input
+                      id="highlight-job"
+                      type="checkbox"
+                      aria-labelledby="highlight-job-label"
+                      checked={formData.highlighted}
+                      onChange={(event) => setFormData((prev) => ({ ...prev, highlighted: event.target.checked }))}
+                      className="mt-1 h-4 w-4 rounded border-amber-400 text-brand focus:ring-brand"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span id="highlight-job-label" className="flex items-center gap-1.5 text-sm font-bold text-slate-900">
+                        {t("postJob.highlight.title")}
+                        <span
+                          title={t("postJob.highlight.tooltip")}
+                          aria-label={t("postJob.highlight.tooltip")}
+                          className="inline-flex text-amber-700"
+                        >
+                          <Info size={16} aria-hidden="true" />
+                        </span>
+                      </span>
+                      <span className="mt-1 block text-xs leading-5 text-slate-600">
+                        {t("postJob.highlight.description", { amount: formatCurrency(HIGHLIGHT_FEE, { maximumFractionDigits: 0 }) })}
+                      </span>
+                    </span>
+                  </div>
+                )}
+
+              </section>
+            </>
+          )}
+
+          {step === 3 && (
+            <>
+              <section className="mt-6 space-y-3 rounded-card border border-slate-200 bg-white p-4 md:p-6">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-brand-600">
+                    <FileText size={20} />
+                  </div>
+                  <h3 className="font-bold text-slate-900">{t("postJob.wizard.summary.title")}</h3>
+                </div>
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm md:grid-cols-2">
+                  <div className="flex justify-between gap-2 border-b border-slate-100 py-1.5">
+                    <dt className="text-slate-500">{t("postJob.wizard.summary.job")}</dt>
+                    <dd className="text-right font-medium text-slate-900">{formData.title || "—"}</dd>
+                  </div>
+                  <div className="border-b border-slate-100 py-1.5 md:col-span-2">
+                    <dt className="text-slate-500">{t("postJob.wizard.summary.description")}</dt>
+                    <dd className="mt-1 whitespace-pre-wrap text-sm text-slate-900">{formData.description || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 border-b border-slate-100 py-1.5">
+                    <dt className="text-slate-500">{t("postJob.wizard.summary.category")}</dt>
+                    <dd className="text-right font-medium text-slate-900">{selectedCategoryName || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 border-b border-slate-100 py-1.5 md:col-span-2">
+                    <dt className="text-slate-500">{t("postJob.wizard.summary.location")}</dt>
+                    <dd className="text-right font-medium text-slate-900">{composeLocation(formData) || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 border-b border-slate-100 py-1.5">
+                    <dt className="text-slate-500">{t("postJob.wizard.summary.jobType")}</dt>
+                    <dd className="text-right font-medium text-slate-900">
+                      {jobTypeOptions.find((o) => o.value === formData.jobType)?.label || formData.jobType || "—"}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-2 border-b border-slate-100 py-1.5">
+                    <dt className="text-slate-500">{t("postJob.wizard.summary.deadline")}</dt>
+                    <dd className="text-right font-medium text-slate-900">{formData.deadline || "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2 py-1.5">
+                    <dt className="text-slate-500">{t("postJob.wizard.summary.positions")}</dt>
+                    <dd className="text-right font-medium text-slate-900">{formData.positionsNeeded || "1"}</dd>
+                  </div>
+                </dl>
+              </section>
+
+              {formData.jobType === 'Recruiting' && <DailyWorkSchedule dates={formData.workDates} rate={Number(formData.minimumSalary || 0)} start={formData.workStartTime} end={formData.workEndTime} />}
+              {!editingJob && (
+                <section className="mt-4 rounded-card border border-brand/20 bg-[#F5F9FF] p-4 md:p-6">
+                  <h3 className="text-section font-bold text-slate-900">{t("postJob.checkout.title")}</h3>
+                  <dl className="mt-3 space-y-2 text-sm">
+                    <div className="flex justify-between gap-4"><dt className="text-slate-600">{t("postJob.wizard.summary.job")}</dt><dd className="text-right font-semibold text-slate-900">{formData.title || "—"}</dd></div>
+                    <div className="border-b border-slate-200 pb-2"><dt className="text-slate-600">{t("postJob.wizard.summary.description")}</dt><dd className="mt-1 whitespace-pre-wrap text-slate-900">{formData.description || "—"}</dd></div>
+                    <div className="flex justify-between gap-4"><dt className="text-slate-600">{t("postJob.checkout.workerPay", { count: Number(formData.positionsNeeded || 1) })}</dt><dd className="font-semibold text-slate-900">{formatCurrency(estimatedEscrow, { maximumFractionDigits: 0 })}</dd></div>
+                    <div className="flex justify-between gap-4"><dt className="text-slate-600">{t("postJob.checkout.postingFee")}</dt><dd className="font-semibold text-slate-900">{formatCurrency(postingFee, { maximumFractionDigits: 0 })}</dd></div>
+                    <div className="flex justify-between gap-4"><dt className="text-slate-600">{t("postJob.checkout.highlightFee")}</dt><dd className="font-semibold text-slate-900">{formatCurrency(highlightFee, { maximumFractionDigits: 0 })}</dd></div>
+                    <div className="flex justify-between gap-4 border-t border-brand/20 pt-3 text-base"><dt className="font-bold text-slate-900">{t("postJob.checkout.total")}</dt><dd className="font-bold text-brand">{formatCurrency(checkoutTotal, { maximumFractionDigits: 0 })}</dd></div>
+                  </dl>
+                  <p className="mt-3 text-xs leading-5 text-slate-600">{t("postJob.checkout.nonRefundable")}</p>
+                </section>
+              )}
+            </>
+          )}
+        </motion.div>
+      </AnimatePresence>
+
+      {/* The negative bottom offset cancels the scroll container's `py-5`
+          (PostJob.tsx), so the bar rests flush against the modal's bottom edge
+          rather than floating 20px above it. Verified at a short viewport with
+          the body fully scrolled: the buttons stay entirely visible and the bar
+          abuts the last summary row without covering it. Not a stray value. */}
+      <div className="sticky -bottom-5 z-10 grid grid-cols-2 gap-3 border-t border-slate-200 bg-white px-1 pb-1 pt-5">
+        {step === 0 ? (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="h-11 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            disabled={submitting}
+          >
+            {t("postJob.actions.cancel")}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={goBack}
+            className="h-11 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            disabled={submitting}
+          >
+            {t("postJob.wizard.back")}
+          </button>
+        )}
+
+        {step < 3 ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              goNext();
+            }}
+            className="h-11 rounded-xl bg-brand text-sm font-semibold text-white transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
+          >
+            {t("postJob.wizard.next")}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={submitCheckout}
+            className="h-11 rounded-xl bg-brand text-sm font-semibold text-white transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 disabled:opacity-60"
+            disabled={submitting}
+          >
+            {submitting
+              ? editingJob
+                ? t("postJob.actions.updating")
+                : t("postJob.actions.posting")
+              : editingJob
+              ? t("postJob.actions.saveChanges")
+              : t("postJob.actions.postJobWithPrice", {
+                  amount: formatCurrency(checkoutTotal, { maximumFractionDigits: 0 }),
+                })}
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}

@@ -1,0 +1,248 @@
+import React, { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { useAuth } from "../contexts/AuthContext";
+import { sendOtp } from "../services/api";
+import { getPostAuthLandingPath } from "../utils/dashboardRoutes";
+import { ROUTES } from "../utils/routes";
+
+const EmailVerification: React.FC = () => {
+  const { t } = useTranslation("auth");
+  const navigate = useNavigate();
+  const { verifyOTP, resendOTP, user } = useAuth();
+  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [hasSent, setHasSent] = useState(false);
+  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const [email] = useState(() => localStorage.getItem("pending_verification_email") || "");
+
+  const getStoredUser = () => {
+    try {
+      const raw = localStorage.getItem("auth_user") || localStorage.getItem("current_user");
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!email || hasSent) {
+      return;
+    }
+
+    let isCancelled = false;
+    const sendCode = async () => {
+      setIsLoading(true);
+      setErrorMessage("");
+      try {
+        await sendOtp({ email });
+        if (!isCancelled) {
+          setHasSent(true);
+          localStorage.setItem("pending_verification_email", email);
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setErrorMessage(t("emailVerification.errors.sendFailed"));
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    sendCode();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [email, hasSent, t]);
+
+  const handleOtpChange = (index: number, value: string) => {
+    if (!/^\d*$/.test(value)) return;
+
+    const next = [...otp];
+    next[index] = value.slice(-1);
+    setOtp(next);
+
+    if (value && index < 5) {
+      inputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Backspace" && !otp[index] && index > 0) {
+      inputRefs.current[index - 1]?.focus();
+    }
+  };
+
+  const handleOtpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage("");
+    const otpCode = otp.join("");
+
+    if (!email) {
+      setErrorMessage(t("emailVerification.errors.missingEmail"));
+      return;
+    }
+
+    if (otpCode.length !== 6) {
+      setErrorMessage(t("emailVerification.errors.incompleteCode"));
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const success = await verifyOTP(otpCode);
+      if (!success) {
+        setErrorMessage(t("emailVerification.errors.invalidCode"));
+        return;
+      }
+
+      const targetUser = user || getStoredUser();
+      const fallbackDestination = getPostAuthLandingPath(targetUser);
+      const destination = sessionStorage.getItem("post_verify_redirect") || fallbackDestination;
+      sessionStorage.removeItem("post_verify_redirect");
+      window.location.replace(destination);
+    } catch {
+      setErrorMessage(t("emailVerification.errors.invalidCode"));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleResendCode = async () => {
+    if (!email) {
+      setErrorMessage(t("emailVerification.errors.missingEmail"));
+      return;
+    }
+
+    setIsLoading(true);
+    setErrorMessage("");
+    try {
+      await resendOTP();
+      setOtp(["", "", "", "", "", ""]);
+    } catch {
+      setErrorMessage(t("emailVerification.errors.resendFailed"));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleBackToLogin = () => {
+    navigate(ROUTES.signIn);
+  };
+
+  if (!email) {
+    return (
+      <div className="min-h-dvh flex items-center justify-center bg-brand p-4 page-transition">
+        <div className="w-full max-w-md">
+          <div className="bg-white rounded-3xl shadow-2xl p-8">
+            <h2 className="text-2xl font-bold text-center text-gray-800 mb-3">{t("emailVerification.missingEmail.title")}</h2>
+            <p className="text-center text-gray-600 text-sm mb-6">
+              {t("emailVerification.missingEmail.description")}
+            </p>
+            <button
+              type="button"
+              onClick={handleBackToLogin}
+              className="brand-primary-interactive w-full rounded-xl py-3 font-semibold"
+            >
+              {t("emailVerification.missingEmail.backToLogin")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-dvh flex items-center justify-center bg-brand p-4 page-transition">
+      <div className="w-full max-w-md">
+        <div className="bg-white rounded-3xl shadow-2xl p-8">
+          <button
+            onClick={handleBackToLogin}
+            className="mb-6 flex items-center justify-center w-10 h-10 rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
+          >
+            <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+
+          <div className="flex justify-center mb-6">
+            <div className="w-16 h-16 rounded-full bg-brand flex items-center justify-center">
+              <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                />
+              </svg>
+            </div>
+          </div>
+
+          <h2 className="text-2xl font-bold text-center text-gray-800 mb-2">{t("emailVerification.title")}</h2>
+          <p className="text-center text-gray-500 text-sm mb-2">
+            {hasSent ? t("emailVerification.statusSent") : t("emailVerification.statusSending")}
+          </p>
+          <p className="text-center text-gray-700 font-medium mb-8">{email}</p>
+
+          <form onSubmit={handleOtpSubmit}>
+            <div className="flex justify-center gap-2 mb-6">
+              {otp.map((digit, index) => (
+                <input
+                  key={index}
+                  ref={(el) => {
+                    inputRefs.current[index] = el;
+                  }}
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={1}
+                  value={digit}
+                  onChange={(e) => handleOtpChange(index, e.target.value)}
+                  onKeyDown={(e) => handleKeyDown(index, e)}
+                  // Six 48px boxes plus gaps need ~328px, but a 375px phone
+                  // leaves far less inside this card's padding, so the row
+                  // forced the whole page to scroll sideways. Same fix already
+                  // applied in components/OTPVerification.tsx: scale the box
+                  // and the digit together, and only take the full size once
+                  // there is room for it.
+                  className="h-12 w-10 shrink-0 text-center text-lg font-semibold border-2 border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent sm:h-[52px] sm:w-12 sm:text-xl"
+                />
+              ))}
+            </div>
+
+            {errorMessage && (
+              <p className="mt-2 mb-4 rounded-lg bg-red-50 px-4 py-2 text-sm text-red-700 text-center">
+                {errorMessage}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={isLoading || otp.join("").length !== 6}
+              className="brand-primary-interactive mb-4 w-full rounded-xl py-3 font-semibold"
+            >
+              {isLoading ? t("emailVerification.submitLoading") : t("emailVerification.submit")}
+            </button>
+
+            <div className="text-center">
+              <span className="text-gray-600 text-sm">{t("emailVerification.resendPrompt")} </span>
+              <button
+                type="button"
+                onClick={handleResendCode}
+                disabled={isLoading}
+                className="text-brand font-medium hover:underline disabled:opacity-50"
+              >
+                {t("emailVerification.resend")}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default EmailVerification;
