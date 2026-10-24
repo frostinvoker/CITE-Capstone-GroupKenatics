@@ -1,0 +1,502 @@
+import mongoose from 'mongoose';
+import User from '../models/User.js';
+import { sendError, sendSuccess } from '../lib/apiResponse.js';
+import { normalizeExperience, normalizeInternship, normalizeCertificate } from '../lib/profileValidation.js';
+import { hasValidAvatarFileSignature, removeUploadFile } from '../middleware/uploadConfig.js';
+
+const MAX_PROFILE_SKILLS = 50;
+const MAX_WORK_EXPERIENCES = 25;
+const MAX_WORK_EXPERIENCE_MEDIA = 6;
+const MAX_SKILL_NAME_LENGTH = 80;
+const MAX_SKILL_DESCRIPTION_LENGTH = 500;
+const MAX_CERTIFICATES = 25;
+const MAX_INTERNSHIPS = 25;
+
+const sendProfileMutationError = (res, error, fallbackMessage) => {
+  if (error?.name === 'ValidationError' || error?.name === 'CastError') {
+    return sendError(res, 400, error?.message || 'Invalid profile data');
+  }
+  if (error?.name === 'VersionError') {
+    return sendError(res, 409, 'Your profile changed in another request. Refresh and try again.');
+  }
+  return sendError(res, 500, fallbackMessage);
+};
+
+const normalizeSkillDescription = (value = '') => String(value || '').trim();
+
+export const addSkill = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { name, description, experience } = req.body || {};
+
+    if (typeof name !== 'string' || !name.trim()) {
+      return sendError(res, 400, 'Skill name is required');
+    }
+    const rawDescription = description ?? experience ?? '';
+    if (typeof rawDescription !== 'string') {
+      return sendError(res, 400, 'Skill description must be a string');
+    }
+    const skillName = name.trim();
+    const skillDescription = normalizeSkillDescription(rawDescription);
+    if (skillName.length > MAX_SKILL_NAME_LENGTH) {
+      return sendError(res, 400, `Skill name must be ${MAX_SKILL_NAME_LENGTH} characters or fewer`);
+    }
+    if (skillDescription.length > MAX_SKILL_DESCRIPTION_LENGTH) {
+      return sendError(res, 400, `Skill description must be ${MAX_SKILL_DESCRIPTION_LENGTH} characters or fewer`);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return sendError(res, 404, 'User not found');
+    }
+
+    const existingSkill = user.skills?.find((s) => s.name.toLowerCase() === skillName.toLowerCase());
+    if (existingSkill) {
+      existingSkill.description = skillDescription;
+      await user.save();
+      return sendSuccess(res, 200, 'Skill description updated successfully', { skills: user.skills });
+    }
+
+    const newSkill = {
+      name: skillName,
+      description: skillDescription,
+      endorsements: 0,
+      createdAt: new Date(),
+    };
+
+    if (!user.skills) {
+      user.skills = [];
+    }
+    if (user.skills.length >= MAX_PROFILE_SKILLS) {
+      return sendError(res, 400, `You can add up to ${MAX_PROFILE_SKILLS} skills`);
+    }
+    user.skills.push(newSkill);
+    await user.save();
+
+    return sendSuccess(res, 201, 'Skill added successfully', { skills: user.skills });
+  } catch (error) {
+    console.error('Add skill error:', error);
+    return sendProfileMutationError(res, error, 'Failed to add skill');
+  }
+};
+
+export const deleteSkill = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { skillId } = req.params;
+
+    if (!mongoose.isValidObjectId(skillId)) {
+      return sendError(res, 400, 'Invalid skill ID');
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return sendError(res, 404, 'User not found');
+    }
+
+    const skillIndex = user.skills?.findIndex((s) => s._id?.toString() === skillId);
+    if (skillIndex === undefined || skillIndex === -1) {
+      return sendError(res, 404, 'Skill not found');
+    }
+
+    user.skills.splice(skillIndex, 1);
+    await user.save();
+
+    return sendSuccess(res, 200, 'Skill deleted successfully', { skills: user.skills });
+  } catch (error) {
+    console.error('Delete skill error:', error);
+    return sendProfileMutationError(res, error, 'Failed to delete skill');
+  }
+};
+
+export const updateSkillDescription = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { skillId } = req.params;
+    const { description, experience } = req.body || {};
+
+    if (!mongoose.isValidObjectId(skillId)) {
+      return sendError(res, 400, 'Invalid skill ID');
+    }
+    const rawDescription = description ?? experience ?? '';
+    if (typeof rawDescription !== 'string') {
+      return sendError(res, 400, 'Skill description must be a string');
+    }
+    const normalizedDescription = normalizeSkillDescription(rawDescription);
+    if (normalizedDescription.length > MAX_SKILL_DESCRIPTION_LENGTH) {
+      return sendError(res, 400, `Skill description must be ${MAX_SKILL_DESCRIPTION_LENGTH} characters or fewer`);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return sendError(res, 404, 'User not found');
+    }
+
+    const skill = user.skills?.find((s) => s._id?.toString() === skillId);
+    if (!skill) {
+      return sendError(res, 404, 'Skill not found');
+    }
+
+    skill.description = normalizedDescription;
+    await user.save();
+
+    return sendSuccess(res, 200, 'Skill description updated successfully', { skills: user.skills });
+  } catch (error) {
+    console.error('Update skill description error:', error);
+    return sendProfileMutationError(res, error, 'Failed to update skill description');
+  }
+};
+
+export const addWorkExperience = async (req, res) => {
+  try {
+    const normalized = normalizeExperience(req.body);
+    if (normalized.error) return sendError(res, 400, normalized.error);
+
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    user.workExperience = user.workExperience || [];
+    if (user.workExperience.length >= MAX_WORK_EXPERIENCES) {
+      return sendError(res, 400, `You can add up to ${MAX_WORK_EXPERIENCES} work experience entries`);
+    }
+    const duplicate = user.workExperience.some((item) =>
+      item.title.toLowerCase() === normalized.value.title.toLowerCase() &&
+      item.company.toLowerCase() === normalized.value.company.toLowerCase() &&
+      item.startDate?.getTime() === normalized.value.startDate.getTime()
+    );
+    if (duplicate) {
+      return sendError(res, 409, 'This work experience is already on your profile');
+    }
+    user.workExperience.push(normalized.value);
+    await user.save();
+
+    return sendSuccess(res, 201, 'Work experience added successfully', {
+      workExperience: user.workExperience,
+    });
+  } catch (error) {
+    console.error('Add work experience error:', error);
+    return sendProfileMutationError(res, error, 'Failed to add work experience');
+  }
+};
+
+export const updateWorkExperience = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.experienceId)) {
+      return sendError(res, 400, 'Invalid work experience ID');
+    }
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const experience = user.workExperience?.id(req.params.experienceId);
+    if (!experience) return sendError(res, 404, 'Work experience not found');
+
+    const normalized = normalizeExperience({ ...experience.toObject(), ...req.body });
+    if (normalized.error) return sendError(res, 400, normalized.error);
+
+    Object.assign(experience, normalized.value);
+    await user.save();
+
+    return sendSuccess(res, 200, 'Work experience updated successfully', {
+      workExperience: user.workExperience,
+    });
+  } catch (error) {
+    console.error('Update work experience error:', error);
+    return sendProfileMutationError(res, error, 'Failed to update work experience');
+  }
+};
+
+export const deleteWorkExperience = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.experienceId)) {
+      return sendError(res, 400, 'Invalid work experience ID');
+    }
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const experience = user.workExperience?.id(req.params.experienceId);
+    if (!experience) return sendError(res, 404, 'Work experience not found');
+
+    // Capture before deleteOne(): afterwards the subdocument is detached and
+    // its media filenames are unreachable, which would orphan the StoredUpload
+    // blobs in Mongo with nothing left pointing at them.
+    const mediaFilenames = (experience.media || []).map((item) => item.filename).filter(Boolean);
+
+    experience.deleteOne();
+    await user.save();
+    await Promise.all(mediaFilenames.map(removeUploadFile));
+
+    return sendSuccess(res, 200, 'Work experience deleted successfully', {
+      workExperience: user.workExperience,
+    });
+  } catch (error) {
+    console.error('Delete work experience error:', error);
+    return sendProfileMutationError(res, error, 'Failed to delete work experience');
+  }
+};
+
+export const addInternship = async (req, res) => {
+  try {
+    const normalized = normalizeInternship(req.body);
+    if (normalized.error) return sendError(res, 400, normalized.error);
+
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    user.internships = user.internships || [];
+    if (user.internships.length >= MAX_INTERNSHIPS) {
+      return sendError(res, 400, `You can add up to ${MAX_INTERNSHIPS} internship entries`);
+    }
+    const duplicate = user.internships.some((item) =>
+      item.title.toLowerCase() === normalized.value.title.toLowerCase() &&
+      item.company.toLowerCase() === normalized.value.company.toLowerCase() &&
+      item.startDate?.getTime() === normalized.value.startDate.getTime()
+    );
+    if (duplicate) {
+      return sendError(res, 409, 'This internship is already on your profile');
+    }
+    user.internships.push(normalized.value);
+    await user.save();
+
+    return sendSuccess(res, 201, 'Internship added successfully', {
+      internships: user.internships,
+    });
+  } catch (error) {
+    console.error('Add internship error:', error);
+    return sendProfileMutationError(res, error, 'Failed to add internship');
+  }
+};
+
+export const updateInternship = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.internshipId)) {
+      return sendError(res, 400, 'Invalid internship ID');
+    }
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const internship = user.internships?.id(req.params.internshipId);
+    if (!internship) return sendError(res, 404, 'Internship not found');
+
+    const normalized = normalizeInternship({ ...internship.toObject(), ...req.body });
+    if (normalized.error) return sendError(res, 400, normalized.error);
+
+    Object.assign(internship, normalized.value);
+    await user.save();
+
+    return sendSuccess(res, 200, 'Internship updated successfully', {
+      internships: user.internships,
+    });
+  } catch (error) {
+    console.error('Update internship error:', error);
+    return sendProfileMutationError(res, error, 'Failed to update internship');
+  }
+};
+
+export const deleteInternship = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.internshipId)) {
+      return sendError(res, 400, 'Invalid internship ID');
+    }
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const internship = user.internships?.id(req.params.internshipId);
+    if (!internship) return sendError(res, 404, 'Internship not found');
+
+    // No media cleanup here, unlike work experience: internships carry no
+    // media[], so there are no StoredUpload blobs to reclaim.
+    internship.deleteOne();
+    await user.save();
+
+    return sendSuccess(res, 200, 'Internship deleted successfully', {
+      internships: user.internships,
+    });
+  } catch (error) {
+    console.error('Delete internship error:', error);
+    return sendProfileMutationError(res, error, 'Failed to delete internship');
+  }
+};
+
+export const addCertificate = async (req, res) => {
+  try {
+    const normalized = normalizeCertificate(req.body);
+    if (normalized.error) return sendError(res, 400, normalized.error);
+
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    user.certificates = user.certificates || [];
+    if (user.certificates.length >= MAX_CERTIFICATES) {
+      return sendError(res, 400, `You can add up to ${MAX_CERTIFICATES} certificates`);
+    }
+    const duplicate = user.certificates.some((item) =>
+      item.name.toLowerCase() === normalized.value.name.toLowerCase() &&
+      item.issuer.toLowerCase() === normalized.value.issuer.toLowerCase() &&
+      item.issueDate?.getTime() === normalized.value.issueDate.getTime()
+    );
+    if (duplicate) {
+      return sendError(res, 409, 'This certificate is already on your profile');
+    }
+    user.certificates.push(normalized.value);
+    await user.save();
+
+    return sendSuccess(res, 201, 'Certificate added successfully', {
+      certificates: user.certificates,
+    });
+  } catch (error) {
+    console.error('Add certificate error:', error);
+    return sendProfileMutationError(res, error, 'Failed to add certificate');
+  }
+};
+
+export const updateCertificate = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.certificateId)) {
+      return sendError(res, 400, 'Invalid certificate ID');
+    }
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const certificate = user.certificates?.id(req.params.certificateId);
+    if (!certificate) return sendError(res, 404, 'Certificate not found');
+
+    const normalized = normalizeCertificate({ ...certificate.toObject(), ...req.body });
+    if (normalized.error) return sendError(res, 400, normalized.error);
+
+    Object.assign(certificate, normalized.value);
+    await user.save();
+
+    return sendSuccess(res, 200, 'Certificate updated successfully', {
+      certificates: user.certificates,
+    });
+  } catch (error) {
+    console.error('Update certificate error:', error);
+    return sendProfileMutationError(res, error, 'Failed to update certificate');
+  }
+};
+
+export const deleteCertificate = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.certificateId)) {
+      return sendError(res, 400, 'Invalid certificate ID');
+    }
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const certificate = user.certificates?.id(req.params.certificateId);
+    if (!certificate) return sendError(res, 404, 'Certificate not found');
+
+    certificate.deleteOne();
+    await user.save();
+
+    return sendSuccess(res, 200, 'Certificate deleted successfully', {
+      certificates: user.certificates,
+    });
+  } catch (error) {
+    console.error('Delete certificate error:', error);
+    return sendProfileMutationError(res, error, 'Failed to delete certificate');
+  }
+};
+
+export const addExperienceMedia = async (req, res) => {
+  // The upload middleware has already persisted the blob by the time this runs,
+  // so every early return below must remove it again or it leaks.
+  const uploadedFilename = req.file?.filename || null;
+  const discardUpload = async () => {
+    if (uploadedFilename) await removeUploadFile(uploadedFilename);
+  };
+
+  try {
+    if (!mongoose.isValidObjectId(req.params.experienceId)) {
+      await discardUpload();
+      return sendError(res, 400, 'Invalid work experience ID');
+    }
+    if (!req.file) {
+      return sendError(res, 400, 'No image was uploaded');
+    }
+    if (!hasValidAvatarFileSignature(req.file)) {
+      await discardUpload();
+      return sendError(res, 400, 'That file is not a valid JPG, PNG, GIF, or WEBP image');
+    }
+
+    const user = await User.findById(req.user?.id);
+    if (!user) {
+      await discardUpload();
+      return sendError(res, 404, 'User not found');
+    }
+
+    const experience = user.workExperience?.id(req.params.experienceId);
+    if (!experience) {
+      await discardUpload();
+      return sendError(res, 404, 'Work experience not found');
+    }
+
+    if ((experience.media?.length || 0) >= MAX_WORK_EXPERIENCE_MEDIA) {
+      await discardUpload();
+      return sendError(res, 400, `You can attach up to ${MAX_WORK_EXPERIENCE_MEDIA} photos to one work experience`);
+    }
+
+    experience.media.push({
+      url: `/uploads/${req.file.filename}`,
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+    });
+    await user.save();
+
+    return sendSuccess(res, 201, 'Photo attached successfully', {
+      workExperience: user.workExperience,
+    });
+  } catch (error) {
+    await discardUpload();
+    console.error('Add experience media error:', error);
+    return sendProfileMutationError(res, error, 'Failed to attach photo');
+  }
+};
+
+export const deleteExperienceMedia = async (req, res) => {
+  try {
+    const { experienceId, mediaId } = req.params;
+    if (!mongoose.isValidObjectId(experienceId) || !mongoose.isValidObjectId(mediaId)) {
+      return sendError(res, 400, 'Invalid work experience or photo ID');
+    }
+
+    const user = await User.findById(req.user?.id);
+    if (!user) return sendError(res, 404, 'User not found');
+
+    const experience = user.workExperience?.id(experienceId);
+    if (!experience) return sendError(res, 404, 'Work experience not found');
+
+    const mediaItem = experience.media?.id(mediaId);
+    if (!mediaItem) return sendError(res, 404, 'Photo not found');
+
+    const { filename } = mediaItem;
+    mediaItem.deleteOne();
+    await user.save();
+    if (filename) await removeUploadFile(filename);
+
+    return sendSuccess(res, 200, 'Photo removed successfully', {
+      workExperience: user.workExperience,
+    });
+  } catch (error) {
+    console.error('Delete experience media error:', error);
+    return sendProfileMutationError(res, error, 'Failed to remove photo');
+  }
+};
+
+export default {
+  addSkill,
+  deleteSkill,
+  updateSkillDescription,
+  addWorkExperience,
+  updateWorkExperience,
+  deleteWorkExperience,
+  addExperienceMedia,
+  deleteExperienceMedia,
+  addInternship,
+  updateInternship,
+  deleteInternship,
+  addCertificate,
+  updateCertificate,
+  deleteCertificate,
+  normalizeExperience,
+};

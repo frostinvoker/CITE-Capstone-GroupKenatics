@@ -1,0 +1,1117 @@
+import axios from 'axios';
+import crypto from 'crypto';
+import { getWebOrigin } from '../lib/runtimeConfig.js';
+import mongoose from 'mongoose';
+import User from '../models/User.js';
+import Transaction from '../models/Transaction.js';
+import PayoutRequest from '../models/PayoutRequest.js';
+import JobApplication from '../models/JobApplication.js';
+import monitor from '../lib/monitor.js';
+import { confirm as confirmWithdrawal } from './WithdrawalController.js';
+import { queueNotification } from '../services/notificationOutbox.js';
+import { sendPaymentReceiptEmail } from '../services/paymentReceiptService.js';
+
+const PAYMONGO_BASE = 'https://api.paymongo.com/v1';
+const XENDIT_BASE = 'https://api.xendit.co';
+const TOPUP_TARGET = {
+  EMPLOYER: 'EMPLOYER',
+  WORKER: 'WORKER',
+  BOTH: 'BOTH',
+};
+const TOPUP_FEE_PERCENT = 0;
+
+const getTopUpBreakdown = (depositAmount) => {
+  const amount = Number(depositAmount);
+  const processingFee = Number((amount * TOPUP_FEE_PERCENT / 100).toFixed(2));
+  return {
+    depositAmount: Number(amount.toFixed(2)),
+    processingFee,
+    totalAmountCharged: Number((amount + processingFee).toFixed(2)),
+  };
+};
+
+const getDepositFromChargedAmount = (chargedAmount) => {
+  const total = Number(chargedAmount);
+  const estimatedDeposit = Number((total / (1 + TOPUP_FEE_PERCENT / 100)).toFixed(2));
+  const breakdown = getTopUpBreakdown(estimatedDeposit);
+  if (breakdown.totalAmountCharged !== Number(total.toFixed(2))) {
+    throw new Error('Payment amount does not match the expected top-up fee');
+  }
+  return breakdown;
+};
+
+const isRetryableTopUpConflict = (error) =>
+  error?.code === 112 ||
+  error?.codeName === 'WriteConflict' ||
+  /write conflict|transient transaction/i.test(String(error?.message || ''));
+
+const canTopUpEmployerWallet = (role) => {
+  const normalizedRole = String(role || '').toLowerCase();
+  return normalizedRole === 'hire' || normalizedRole === 'both' || normalizedRole === 'admin' || normalizedRole === 'superadmin';
+};
+
+const canWithdrawWorkerBalance = (role) => {
+  const normalizedRole = String(role || '').toLowerCase();
+  return normalizedRole === 'work' || normalizedRole === 'both';
+};
+
+const normalizePayoutBalanceTarget = (value) => String(value || 'WORKER').trim().toUpperCase();
+
+const normalizeTarget = (value) => {
+  const normalized = String(value || TOPUP_TARGET.EMPLOYER).toUpperCase();
+  if (normalized === TOPUP_TARGET.WORKER || normalized === TOPUP_TARGET.BOTH) return normalized;
+  return TOPUP_TARGET.EMPLOYER;
+};
+
+const buildTopUpLabel = (target) => {
+  if (target === TOPUP_TARGET.WORKER) return 'Top-up (Worker)';
+  if (target === TOPUP_TARGET.BOTH) return 'Top-up (Both)';
+  return 'Top-up (Employer)';
+};
+
+const populateTransactionQuery = (query) =>
+  query
+    .populate('sender', 'firstName lastName email companyName role status')
+    .populate('receiver', 'firstName lastName email companyName role status')
+    .populate('jobReference', 'title status')
+    .populate('payoutRequest', 'status amount destinationSnapshot createdAt paidAt reviewedAt')
+    .populate('linkedTransaction', 'type status amount createdAt reference');
+
+async function sendReceiptWithoutBlockingPayment(transactionId, userId, eventName) {
+  try {
+    const result = await sendPaymentReceiptEmail({ transactionId, userId });
+    if (!result.sent) {
+      if (result.reason === 'smtp_unconfigured') {
+        console.warn(`${eventName} completed, but the receipt email was skipped because SMTP is not configured. Configure SMTP before enabling receipt delivery.`, {
+          transactionId: String(transactionId),
+        });
+      } else {
+        console.warn(`${eventName} completed, but no receipt could be sent`, {
+          reason: result.reason,
+          transactionId: String(transactionId),
+        });
+      }
+    }
+  } catch (error) {
+    console.warn(`${eventName} completed, but the receipt email failed`, {
+      transactionId: String(transactionId),
+      attempts: error?.receiptAttempts || 1,
+      message: error?.message || 'Unknown email delivery error',
+    });
+  }
+}
+
+const createXenditCheckout = async ({ amount, referenceNumber, target, user, req }) => {
+  const xenditSecret = process.env.XENDIT_SECRET_KEY;
+  const directLink = process.env.XENDIT_PAYMENT_LINK_URL;
+
+  if (!xenditSecret && directLink) {
+    return {
+      checkoutUrl: directLink,
+      checkoutId: referenceNumber,
+      provider: 'xendit-link',
+    };
+  }
+
+  if (!xenditSecret) {
+    return null;
+  }
+
+  const payload = {
+    external_id: referenceNumber,
+    amount: Number(amount),
+    description: `MicroJobs wallet top-up (${target})`,
+    success_redirect_url: `${getWebOrigin(req)}/topup-success?ref=${encodeURIComponent(referenceNumber)}`,
+    failure_redirect_url: `${getWebOrigin(req)}/employer/e-wallet`,
+    currency: 'PHP',
+    customer: {
+      given_names: user?.firstName || 'MicroJobs',
+      surname: user?.lastName || 'User',
+      email: user?.email || undefined,
+    },
+  };
+
+  const response = await axios.request({
+    method: 'POST',
+    url: `${XENDIT_BASE}/v2/invoices`,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Basic ${Buffer.from(`${xenditSecret}:`).toString('base64')}`,
+    },
+    data: payload,
+  });
+  const invoice = response?.data || {};
+
+  return {
+    checkoutUrl: invoice.invoice_url,
+    checkoutId: invoice.id || referenceNumber,
+    provider: 'xendit',
+  };
+};
+
+async function applyTopUpToUser({ user, amount, target, reference, source, checkoutId = null, actor = null, processingFee = 0, totalAmountCharged = null, attempt = 0 }) {
+  const normalizedTarget = normalizeTarget(target);
+  const numericAmount = Number(amount);
+
+  if (Number.isNaN(numericAmount) || numericAmount <= 0) {
+    throw new Error('Invalid top-up amount');
+  }
+
+  // Use a mongoose transaction to guarantee idempotent, atomic application of top-up.
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    // Idempotency: if a transaction with the same reference or providerReference already exists, return it
+    const existingQuery = reference ? { reference } : null;
+    let existing = null;
+    if (existingQuery) existing = await Transaction.findOne(existingQuery).session(session);
+    if (!existing && checkoutId) existing = await Transaction.findOne({ providerReference: checkoutId }).session(session);
+    if (existing) {
+      await session.abortTransaction();
+      session.endSession();
+      return {
+        target: normalizedTarget,
+        transaction: existing,
+        transactions: [existing],
+        created: false,
+        user: {
+          _id: user._id,
+          employerBalance: user.employerBalance,
+          workerBalance: user.workerBalance,
+        },
+      };
+    }
+
+    // Refresh user inside session to avoid race
+    const userDoc = await User.findById(user._id).session(session);
+    if (!userDoc) throw new Error('User not found');
+
+    if (normalizedTarget === TOPUP_TARGET.WORKER) {
+      userDoc.workerBalance = (userDoc.workerBalance || 0) + numericAmount;
+    }
+    if (normalizedTarget === TOPUP_TARGET.EMPLOYER) {
+      userDoc.employerBalance = (userDoc.employerBalance || 0) + numericAmount;
+    }
+    if (normalizedTarget === TOPUP_TARGET.BOTH) {
+      const workerShare = Number((numericAmount / 2).toFixed(2));
+      const employerShare = Number((numericAmount - workerShare).toFixed(2));
+      userDoc.workerBalance = (userDoc.workerBalance || 0) + workerShare;
+      userDoc.employerBalance = (userDoc.employerBalance || 0) + employerShare;
+    }
+
+    await userDoc.save({ session });
+
+    const tx = await Transaction.create([
+      {
+        sender: null,
+        receiver: userDoc._id,
+        amount: numericAmount,
+        type: 'TOP_UP',
+        status: 'COMPLETED',
+        balanceTarget: normalizedTarget === TOPUP_TARGET.BOTH ? 'SYSTEM' : normalizedTarget,
+        reference,
+        provider: source || null,
+        providerReference: checkoutId || reference || null,
+        label: buildTopUpLabel(normalizedTarget),
+        relatedEntityType: 'wallet_topup',
+        relatedEntityId: reference,
+        meta: {
+          source,
+          checkout_id: checkoutId || null,
+          target: normalizedTarget,
+          depositAmount: numericAmount,
+          processingFee: Number(processingFee || 0),
+          totalAmountCharged: Number(totalAmountCharged || numericAmount),
+        },
+        actor: actor || null,
+      },
+    ], { session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    const transaction = Array.isArray(tx) ? tx[0] : tx;
+    return {
+      target: normalizedTarget,
+      transaction,
+      transactions: [transaction],
+      created: true,
+      user: {
+        _id: userDoc._id,
+        employerBalance: userDoc.employerBalance,
+        workerBalance: userDoc.workerBalance,
+      },
+    };
+  } catch (err) {
+    try { await session.abortTransaction(); } catch (e) {}
+    session.endSession();
+    if (attempt < 3 && isRetryableTopUpConflict(err)) {
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+      return applyTopUpToUser({
+        user,
+        amount,
+        target,
+        reference,
+        source,
+        checkoutId,
+        actor,
+        processingFee,
+        totalAmountCharged,
+        attempt: attempt + 1,
+      });
+    }
+    throw err;
+  }
+}
+
+const payoutHttpError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
+
+async function createPayoutRefund({ payoutRequest, actorId, reason, status, session }) {
+  const user = await User.findById(payoutRequest.user).session(session);
+  if (!user) throw new Error('User not found');
+
+  const sourceWallet = payoutRequest.sourceWallet || payoutRequest.balanceTarget || 'WORKER';
+  const balanceField = sourceWallet === 'EMPLOYER' ? 'employerBalance' : 'workerBalance';
+  user[balanceField] = (user[balanceField] || 0) + (payoutRequest.totalDebit || payoutRequest.amount);
+  await user.save({ session });
+
+  const [refund] = await Transaction.create([{
+      sender: null,
+      receiver: user._id,
+      amount: payoutRequest.amount,
+      type: 'REFUND',
+      status: 'COMPLETED',
+      balanceTarget: sourceWallet,
+      payoutRequest: payoutRequest._id,
+      reference: `PAYOUT-REFUND-${payoutRequest._id}`,
+      label: `Payout refund (${String(status || reason || 'reversed').toLowerCase()})`,
+      relatedEntityType: 'payout_request',
+      relatedEntityId: String(payoutRequest._id),
+      linkedTransaction: payoutRequest.transaction || null,
+      meta: { reason },
+      actor: actorId || null,
+    }], { session });
+
+  if (payoutRequest.transaction) {
+    await Transaction.findByIdAndUpdate(payoutRequest.transaction, {
+      $set: { status: 'CANCELLED', linkedTransaction: refund._id },
+    }, { session });
+  }
+
+  return { user, refund };
+}
+
+export async function getUserTransactions(req, res) {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+    const txs = await populateTransactionQuery(
+      Transaction.find({ $or: [{ sender: userId }, { receiver: userId }] }).sort({ createdAt: -1 })
+    );
+
+    return res.status(200).json({ transactions: txs });
+  } catch (error) {
+    console.error('Get transactions error', error);
+    return res.status(500).json({ message: 'Failed to fetch transactions' });
+  }
+}
+
+export async function emailTransactionReceipt(req, res) {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+    const result = await sendPaymentReceiptEmail({
+      transactionId: req.params.transactionId,
+      userId,
+    });
+    if (!result.sent) {
+      if (result.reason === 'not_found') return res.status(404).json({ message: 'Transaction not found' });
+      if (result.reason === 'unsupported_transaction_type') {
+        return res.status(400).json({ message: 'Email receipts are available only for wallet transfers and withdrawals.' });
+      }
+      if (result.reason === 'smtp_unconfigured') {
+        return res.status(503).json({ message: 'Receipt email is not configured. Please contact support.' });
+      }
+      return res.status(500).json({ message: 'Unable to send receipt email' });
+    }
+
+    return res.status(200).json({ message: 'Receipt sent to your email.' });
+  } catch (error) {
+    console.error('Email transaction receipt error', error);
+    return res.status(500).json({ message: 'Unable to send receipt email' });
+  }
+}
+
+export async function getMobileWallet(req, res) {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    const mode = String(req.query?.mode || '').toLowerCase();
+    const user = await User.findById(userId).select('role workerBalance employerBalance');
+    if (!user) return res.status(404).json({ message: 'User not found.' });
+    if (mode === 'worker' && !canWithdrawWorkerBalance(user.role)) return res.status(403).json({ message: 'Worker wallet is unavailable for this account.' });
+    if (mode === 'employer' && !canTopUpEmployerWallet(user.role)) return res.status(403).json({ message: 'Employer wallet is unavailable for this account.' });
+    if (!['worker', 'employer'].includes(mode)) return res.status(400).json({ message: 'Wallet mode must be worker or employer.' });
+
+    const balanceTarget = mode === 'worker' ? 'WORKER' : { $in: ['EMPLOYER', 'ESCROW'] };
+    const filter = { balanceTarget, $or: [{ sender: userId }, { receiver: userId }] };
+    const transactions = await populateTransactionQuery(Transaction.find(filter).sort({ createdAt: -1 }).limit(100));
+    const completed = transactions.filter((item) => item.status === 'COMPLETED');
+    const credited = completed.filter((item) => String(item.receiver?._id || item.receiver || '') === String(userId)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const spent = completed.filter((item) => String(item.sender?._id || item.sender || '') === String(userId)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const pendingTransactions = transactions.filter((item) => item.status === 'PENDING' && !item.payoutRequest).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const pendingPayouts = await PayoutRequest.aggregate([{ $match: { user: user._id, status: { $in: ['requested', 'approved', 'processing'] }, ...(mode === 'employer' ? { $or: [{ sourceWallet: 'EMPLOYER' }, { sourceWallet: { $exists: false }, balanceTarget: 'EMPLOYER' }] } : { $or: [{ sourceWallet: 'WORKER' }, { sourceWallet: { $exists: false }, balanceTarget: { $ne: 'EMPLOYER' } }] }) } }, { $group: { _id: null, total: { $sum: '$amount' } } }]);
+    const employerPendingAssignments = mode === 'employer'
+      ? await JobApplication.aggregate([
+          { $match: { status: 'Hired', paymentStatus: { $in: ['Authorized', 'Secured'] } } },
+          { $lookup: { from: 'jobs', localField: 'job', foreignField: '_id', as: 'jobDoc' } },
+          { $unwind: '$jobDoc' },
+          { $match: { 'jobDoc.jobPoster': user._id } },
+          { $group: { _id: null, total: { $sum: { $ifNull: ['$agreedAmount', '$jobDoc.salary'] } } } },
+        ])
+      : [];
+    const ledger = transactions.map((item) => {
+      const entry = typeof item.toObject === 'function' ? item.toObject() : item;
+      const receiverId = String(item.receiver?._id || item.receiver || '');
+      const senderId = String(item.sender?._id || item.sender || '');
+      return { ...entry, walletDirection: receiverId === String(userId) ? 'credit' : senderId === String(userId) ? 'debit' : 'neutral' };
+    });
+    return res.status(200).json({
+      mode,
+      balance: mode === 'worker' ? Number(user.workerBalance || 0) : Number(user.employerBalance || 0),
+      summary: { credited, spent, pending: pendingTransactions + Number(pendingPayouts[0]?.total || 0) + Number(employerPendingAssignments[0]?.total || 0), transactionCount: transactions.length },
+      transactions: ledger,
+    });
+  } catch (error) {
+    console.error('Get mobile wallet error:', error);
+    return res.status(500).json({ message: 'Failed to load wallet.' });
+  }
+}
+
+export async function createTopUpSession(req, res) {
+  try {
+    const ip = req.ip || req.headers['x-forwarded-for'] || null;
+    const ua = req.get('user-agent');
+    if (process.env.ENABLE_CSRF === 'true') {
+      const tokenHeader = req.headers['x-csrf-token'];
+      const cookieName = process.env.CSRF_COOKIE_NAME || 'csrfToken';
+      const tokenCookie = req.cookies && req.cookies[cookieName];
+      if (!tokenHeader || !tokenCookie || tokenHeader !== tokenCookie) {
+        return res.status(403).json({ message: 'CSRF token missing or invalid' });
+      }
+    }
+
+    const { amount, target } = req.body;
+    const userId = req.user.id;
+    const minAmount = Number(process.env.TOPUP_MIN_AMOUNT || 100);
+    const maxAmount = Number(process.env.TOPUP_MAX_AMOUNT || 1000000);
+    const parsedAmount = Number(amount);
+    if (Number.isNaN(parsedAmount) || parsedAmount < minAmount || parsedAmount > maxAmount) {
+      return res.status(400).json({ message: `Invalid amount; must be between ${minAmount} and ${maxAmount}` });
+    }
+
+    const requestingUser = await User.findById(userId).select('role firstName lastName email');
+    if (!requestingUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (!canTopUpEmployerWallet(requestingUser.role)) {
+      return res.status(403).json({ message: 'Only employer accounts can top up wallets' });
+    }
+    const breakdown = getTopUpBreakdown(parsedAmount);
+
+    let effectiveTarget = TOPUP_TARGET.EMPLOYER;
+    if (target && String(target).toUpperCase() !== TOPUP_TARGET.EMPLOYER) {
+      return res.status(400).json({ message: 'Invalid target. Top-up target must be EMPLOYER.' });
+    }
+
+    await monitor.audit({
+      actor: req.user?.id || null,
+      action: 'topup_initiated',
+      ip,
+      userAgent: ua,
+      amount: parsedAmount,
+      status: 'initiated',
+      meta: { target: effectiveTarget },
+    });
+
+    const { Types } = await import('mongoose');
+    if (!Types.ObjectId.isValid(userId)) return res.status(400).json({ message: 'Invalid user id' });
+
+    const referenceNumber = `TOPUP-${userId}-${effectiveTarget}-${Date.now()}`;
+
+    try {
+      const xenditCheckout = await createXenditCheckout({
+        amount: breakdown.totalAmountCharged,
+        referenceNumber,
+        target: effectiveTarget,
+        user: requestingUser,
+        req,
+      });
+
+      if (xenditCheckout?.checkoutUrl) {
+        return res.status(200).json({
+          checkoutUrl: xenditCheckout.checkoutUrl,
+          referenceNumber,
+          checkoutId: xenditCheckout.checkoutId,
+          provider: xenditCheckout.provider,
+          ...breakdown,
+        });
+      }
+    } catch (xenditError) {
+      console.warn('Xendit top-up init failed, falling back to PayMongo:', xenditError?.response?.data || xenditError?.message || xenditError);
+    }
+
+    const amountInCentavos = Math.round(breakdown.totalAmountCharged * 100);
+    if (!process.env.PAYMONGO_SECRET_KEY) {
+      console.error('PAYMONGO_SECRET_KEY not configured');
+      return res.status(500).json({ message: 'Payment provider not configured' });
+    }
+
+    const response = await axios.request({
+      method: 'POST',
+      url: `${PAYMONGO_BASE}/checkout_sessions`,
+      headers: {
+        accept: 'application/json',
+        'Content-Type': 'application/json',
+        authorization: `Basic ${Buffer.from(process.env.PAYMONGO_SECRET_KEY).toString('base64')}`,
+      },
+      data: {
+        data: {
+          attributes: {
+            payment_method_types: ['gcash'],
+            line_items: [{ currency: 'PHP', amount: amountInCentavos, name: 'E-Wallet Top Up', quantity: 1 }],
+            reference_number: referenceNumber,
+            success_url: `${getWebOrigin(req)}/topup-success?ref=${encodeURIComponent(referenceNumber)}`,
+            cancel_url: `${getWebOrigin(req)}/employer/e-wallet`,
+          },
+        },
+      },
+    });
+
+    const checkout = response.data.data;
+    return res.status(200).json({
+      checkoutUrl: checkout.attributes.checkout_url,
+      referenceNumber,
+      checkoutId: checkout.id,
+      provider: 'paymongo',
+      ...breakdown,
+    });
+  } catch (error) {
+    console.error('PayMongo Error:', error.response?.data || error.message || error);
+    const ip = req.ip || req.headers['x-forwarded-for'] || null;
+    const ua = req.get('user-agent');
+    const reqAmount = Number(req.body?.amount || 0);
+    await monitor.audit({ actor: req.user?.id || null, action: 'topup_failed', ip, userAgent: ua, amount: reqAmount, status: 'failed', meta: { message: error.message } });
+    await monitor.recordFailure({ key: 'topup_initiation', userId: req.user?.id, ip, reason: error.message });
+    return res.status(500).json({ message: 'Failed to initiate top-up.' });
+  }
+}
+
+export async function handleWebhook(req, res) {
+  try {
+    const signatureHeader = req.headers['paymongo-signature'];
+    const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET;
+
+    if (!signatureHeader) return res.status(400).send('Webhook Error: No signature');
+    if (!webhookSecret) {
+      console.error('Webhook called but PAYMONGO_WEBHOOK_SECRET not configured');
+      return res.status(500).send('Webhook misconfigured');
+    }
+
+    const parts = signatureHeader.split(',').reduce((acc, p) => {
+      const [k, v] = p.split('=');
+      acc[k] = v;
+      return acc;
+    }, {});
+    const timestamp = parts.t;
+    const signature = parts.te;
+    if (!timestamp || !signature) return res.status(400).send('Webhook Error: malformed signature header');
+
+    const tsNum = Number(timestamp);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (Number.isNaN(tsNum) || Math.abs(nowSec - tsNum) > 300) {
+      return res.status(400).send('Webhook Error: timestamp invalid or expired');
+    }
+
+    // PayMongo signs the exact bytes it sent, so the HMAC must be computed over
+    // the raw request buffer (captured in app.js). JSON.stringify(req.body)
+    // cannot stand in for it: the global sanitize middleware strips keys that
+    // start with `$` or contain `.` from req.body before this handler runs, and
+    // re-serializing is not guaranteed to reproduce the original byte sequence
+    // even when nothing was stripped. Getting this wrong rejects genuine
+    // webhooks, which silently means paid top-ups never credit.
+    const rawBody = req.rawBody;
+    if (!rawBody?.length) {
+      return res.status(400).send('Webhook Error: missing raw body');
+    }
+
+    const payloadString = `${timestamp}.${rawBody.toString('utf8')}`;
+    const expectedSignature = crypto.createHmac('sha256', webhookSecret).update(payloadString).digest('hex');
+    // Constant-time compare so the valid signature cannot be recovered byte by
+    // byte from response timing.
+    const providedDigest = Buffer.from(String(signature), 'utf8');
+    const expectedDigest = Buffer.from(expectedSignature, 'utf8');
+    if (
+      providedDigest.length !== expectedDigest.length ||
+      !crypto.timingSafeEqual(providedDigest, expectedDigest)
+    ) {
+      return res.status(400).send('Webhook Error: Invalid signature');
+    }
+
+    const event = req.body.data;
+    const eventType = event.attributes?.type || event.type;
+    if (eventType === 'checkout_session.payment.paid') {
+      const checkoutNode = event.attributes?.data || event.data;
+      const checkoutAttrs = checkoutNode?.attributes || {};
+      const referenceNumber = checkoutAttrs.reference_number || checkoutAttrs.referenceNumber || '';
+      const checkoutId = checkoutNode?.id || checkoutAttrs?.id || null;
+
+      if (referenceNumber && referenceNumber.startsWith('TOPUP')) {
+        const partsRef = referenceNumber.split('-');
+        const userId = partsRef[1];
+        const target = normalizeTarget(partsRef[2] || TOPUP_TARGET.EMPLOYER);
+
+        let amountAdded = 0;
+        if (checkoutAttrs.payments && checkoutAttrs.payments.length > 0) {
+          amountAdded = checkoutAttrs.payments[0].attributes.amount / 100;
+        } else if (checkoutAttrs.line_items && checkoutAttrs.line_items.length > 0) {
+          amountAdded = checkoutAttrs.line_items[0].amount / 100;
+        }
+
+        if (amountAdded <= 0) {
+          return res.status(400).send('Webhook Error: No payment amount');
+        }
+
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).send('User not found');
+
+        const exists = await Transaction.findOne({ reference: referenceNumber });
+        if (exists) {
+          return res.status(200).send('Already processed');
+        }
+
+        let breakdown;
+        try {
+          breakdown = getDepositFromChargedAmount(amountAdded);
+        } catch {
+          return res.status(400).send('Webhook Error: payment amount does not match the expected top-up fee');
+        }
+        const topUpResult = await applyTopUpToUser({
+          user,
+          amount: breakdown.depositAmount,
+          target,
+          reference: referenceNumber,
+          source: 'paymongo',
+          checkoutId,
+          processingFee: breakdown.processingFee,
+          totalAmountCharged: breakdown.totalAmountCharged,
+        });
+        if (topUpResult.created) {
+          await sendReceiptWithoutBlockingPayment(topUpResult.transaction._id, user._id, 'Top-up');
+        }
+      }
+    }
+
+    return res.status(200).send('Webhook received');
+  } catch (error) {
+    console.error('Webhook processing error', error.response?.data || error.message || error);
+    return res.status(500).send('Webhook processing failed');
+  }
+}
+
+export async function confirmTopUp(req, res) {
+  try {
+    if (process.env.ENABLE_CSRF === 'true') {
+      const tokenHeader = req.headers['x-csrf-token'];
+      const cookieName = process.env.CSRF_COOKIE_NAME || 'csrfToken';
+      const tokenCookie = req.cookies && req.cookies[cookieName];
+      if (!tokenHeader || !tokenCookie || tokenHeader !== tokenCookie) {
+        return res.status(403).json({ message: 'CSRF token missing or invalid' });
+      }
+    }
+
+    const { referenceNumber, checkoutId, provider, paymentIntentId } = req.body;
+    if (!referenceNumber && !checkoutId) return res.status(400).json({ message: 'referenceNumber or checkoutId required' });
+
+    let existing = null;
+    if (referenceNumber) existing = await Transaction.findOne({ reference: referenceNumber });
+    if (!existing && checkoutId) existing = await Transaction.findOne({ providerReference: checkoutId });
+    if (existing) return res.status(200).json({ message: 'Already processed', transaction: existing });
+
+    const { Types } = await import('mongoose');
+    const maybeXenditCheckoutId = String(checkoutId || '');
+    const providerHint = String(provider || '').toLowerCase();
+    const canTryXendit = Boolean(process.env.XENDIT_SECRET_KEY);
+    const shouldTryXendit = canTryXendit && (
+      providerHint.startsWith('xendit') ||
+      maybeXenditCheckoutId.startsWith('inv-') ||
+      Boolean(referenceNumber)
+    );
+
+    if (shouldTryXendit) {
+      const xHeaders = {
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${process.env.XENDIT_SECRET_KEY}:`).toString('base64')}`,
+        },
+      };
+
+      let invoice = null;
+      if (maybeXenditCheckoutId.startsWith('inv-')) {
+        try {
+          const xResp = await axios.get(`${XENDIT_BASE}/v2/invoices/${maybeXenditCheckoutId}`, xHeaders);
+          invoice = xResp?.data || null;
+        } catch (invoiceByIdError) {
+          console.warn('Xendit invoice lookup by ID failed:', invoiceByIdError?.response?.data || invoiceByIdError?.message || invoiceByIdError);
+        }
+      }
+
+      if (!invoice && referenceNumber) {
+        try {
+          const listResp = await axios.get(`${XENDIT_BASE}/v2/invoices?external_id=${encodeURIComponent(referenceNumber)}`, xHeaders);
+          const list = Array.isArray(listResp?.data) ? listResp.data : [];
+          invoice = list.find((item) => item?.external_id === referenceNumber) || list[0] || null;
+        } catch (invoiceByRefError) {
+          console.warn('Xendit invoice lookup by reference failed:', invoiceByRefError?.response?.data || invoiceByRefError?.message || invoiceByRefError);
+        }
+      }
+
+      if (invoice) {
+        const ref = invoice.external_id || referenceNumber;
+        const refParts = (ref || '').split('-');
+        if (refParts.length < 4 || refParts[0] !== 'TOPUP') {
+          return res.status(400).json({ message: 'Invalid reference format' });
+        }
+
+        const refUserId = refParts[1];
+        if (!Types.ObjectId.isValid(refUserId)) return res.status(400).json({ message: 'Invalid reference user id' });
+        if (refUserId !== String(req.user.id)) return res.status(403).json({ message: 'Not authorized to confirm this top-up' });
+        if (String(invoice.status || '').toUpperCase() !== 'PAID') {
+          return res.status(400).json({ message: 'Payment not completed yet' });
+        }
+
+        const amountCharged = Number(invoice.paid_amount || invoice.amount || 0);
+        if (!Number.isFinite(amountCharged) || amountCharged <= 0) {
+          return res.status(400).json({ message: 'No payment found for this checkout' });
+        }
+        let breakdown;
+        try {
+          breakdown = getDepositFromChargedAmount(amountCharged);
+        } catch {
+          return res.status(400).json({ message: 'Payment amount does not match the expected top-up fee' });
+        }
+
+        const user = await User.findById(refUserId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const topUpResult = await applyTopUpToUser({
+          user,
+          amount: breakdown.depositAmount,
+          target: normalizeTarget(refParts[2] || TOPUP_TARGET.EMPLOYER),
+          reference: ref,
+          source: 'xendit',
+          checkoutId: invoice.id || maybeXenditCheckoutId,
+          actor: user._id,
+          processingFee: breakdown.processingFee,
+          totalAmountCharged: breakdown.totalAmountCharged,
+        });
+
+        await monitor.audit({
+          actor: user._id,
+          action: 'confirm_topup',
+          ip: req.ip || null,
+          userAgent: req.get('user-agent'),
+          amount: breakdown.depositAmount,
+          status: 'success',
+          meta: { target: topUpResult.target, ref, provider: 'xendit' },
+        });
+        await monitor.recordTopUp({ userId: String(user._id), ip: req.ip || null });
+        if (topUpResult.created) {
+          await sendReceiptWithoutBlockingPayment(topUpResult.transaction._id, user._id, 'Top-up');
+        }
+
+        return res.status(200).json({
+          message: 'Top-up applied',
+          ...(topUpResult.target === TOPUP_TARGET.BOTH ? { transactions: topUpResult.transactions } : { transaction: topUpResult.transaction }),
+        });
+      }
+    }
+
+    if (!checkoutId && !paymentIntentId) {
+      return res.status(400).json({ message: 'Unable to confirm payment. Missing checkout ID and payment intent ID. Please contact support.' });
+    }
+
+    if (!checkoutId) {
+      return res.status(400).json({ message: 'Checkout ID is required for PayMongo confirmation' });
+    }
+
+    const resp = await axios.get(`${PAYMONGO_BASE}/checkout_sessions/${checkoutId}`, {
+      headers: {
+        authorization: `Basic ${Buffer.from(process.env.PAYMONGO_SECRET_KEY).toString('base64')}`,
+      },
+    }).catch((error) => {
+      console.warn('PayMongo checkout lookup by ID failed:', error.response?.data || error.message);
+      return null;
+    });
+    if (!resp?.data?.data) {
+      return res.status(400).json({ message: 'Payment session not found. Please try again.' });
+    }
+
+    const checkout = resp.data.data;
+    const attrs = checkout.attributes || {};
+    const ref = attrs.reference_number || referenceNumber;
+    const refParts = (ref || '').split('-');
+    if (refParts.length < 4 || refParts[0] !== 'TOPUP') {
+      return res.status(400).json({ message: 'Invalid reference format' });
+    }
+
+    const refUserId = refParts[1];
+    if (!Types.ObjectId.isValid(refUserId)) return res.status(400).json({ message: 'Invalid reference user id' });
+    if (refUserId !== String(req.user.id)) return res.status(403).json({ message: 'Not authorized to confirm this top-up' });
+
+    let amountCharged = 0;
+    if (attrs.payments && attrs.payments.length > 0) amountCharged = attrs.payments[0].attributes.amount / 100;
+    else if (attrs.line_items && attrs.line_items.length > 0) amountCharged = attrs.line_items[0].amount / 100;
+    if (amountCharged <= 0) {
+      await monitor.audit({ actor: req.user?.id || null, action: 'confirm_no_amount', ip: req.ip || null, userAgent: req.get('user-agent'), status: 'failed', meta: { ref } });
+      await monitor.recordFailure({ key: 'confirm_no_amount', userId: req.user?.id, ip: req.ip || null, reason: 'no_amount' });
+      return res.status(400).json({ message: 'No payment found for this checkout' });
+    }
+    let breakdown;
+    try {
+      breakdown = getDepositFromChargedAmount(amountCharged);
+    } catch {
+      return res.status(400).json({ message: 'Payment amount does not match the expected top-up fee' });
+    }
+
+    const user = await User.findById(refUserId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const topUpResult = await applyTopUpToUser({
+      user,
+      amount: breakdown.depositAmount,
+      target: normalizeTarget(refParts[2] || TOPUP_TARGET.EMPLOYER),
+      reference: ref,
+      source: 'paymongo',
+      checkoutId: checkout.id,
+      actor: user._id,
+      processingFee: breakdown.processingFee,
+      totalAmountCharged: breakdown.totalAmountCharged,
+    });
+
+    await monitor.audit({
+      actor: user._id,
+      action: 'confirm_topup',
+      ip: req.ip || null,
+      userAgent: req.get('user-agent'),
+      amount: breakdown.depositAmount,
+      status: 'success',
+      meta: { target: topUpResult.target, ref, provider: 'paymongo' },
+    });
+    await monitor.recordTopUp({ userId: String(user._id), ip: req.ip || null });
+    if (topUpResult.created) {
+      await sendReceiptWithoutBlockingPayment(topUpResult.transaction._id, user._id, 'Top-up');
+    }
+
+    return res.status(200).json({
+      message: 'Top-up applied',
+      ...(topUpResult.target === TOPUP_TARGET.BOTH ? { transactions: topUpResult.transactions } : { transaction: topUpResult.transaction }),
+    });
+  } catch (error) {
+    const errorMsg = error.response?.data?.message || error.message || 'Unknown error';
+    console.error('Confirm top-up error:', errorMsg, error.response?.data || error);
+    return res.status(500).json({ message: `Failed to confirm top-up: ${errorMsg}` });
+  }
+}
+
+export async function simulateWebhook(req, res) {
+  try {
+    const allow = process.env.NODE_ENV !== 'production' || process.env.ALLOW_DEV_WEBHOOK === 'true';
+    if (!allow) return res.status(403).json({ message: 'Not allowed' });
+
+    const { referenceNumber, amount, checkoutId } = req.body;
+    if (!referenceNumber || !amount) return res.status(400).json({ message: 'referenceNumber and amount required' });
+
+    const exists = await Transaction.findOne({ reference: referenceNumber });
+    if (exists) return res.status(200).json({ message: 'Already processed', transaction: exists });
+
+    const parts = referenceNumber.split('-');
+    if (!parts[0] || parts[0] !== 'TOPUP') return res.status(400).json({ message: 'Invalid reference format' });
+    const userId = parts[1];
+    const target = normalizeTarget(parts[2] || TOPUP_TARGET.EMPLOYER);
+    const { Types } = await import('mongoose');
+    if (!Types.ObjectId.isValid(userId)) return res.status(400).json({ message: 'Invalid reference user id' });
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const amountNum = Number(amount);
+    if (Number.isNaN(amountNum) || amountNum <= 0) return res.status(400).json({ message: 'Invalid amount' });
+
+    const topUpResult = await applyTopUpToUser({
+      user,
+      amount: amountNum,
+      target,
+      reference: referenceNumber,
+      source: 'dev-webhook',
+      checkoutId: checkoutId || null,
+      actor: user._id,
+    });
+
+    await monitor.audit({
+      actor: user._id,
+      action: 'dev_webhook_topup',
+      ip: req.ip || null,
+      userAgent: req.get('user-agent'),
+      amount: amountNum,
+      status: 'success',
+      meta: { target: topUpResult.target, referenceNumber },
+    });
+    await monitor.recordTopUp({ userId: String(user._id), ip: req.ip || null });
+    if (topUpResult.created) {
+      await sendReceiptWithoutBlockingPayment(topUpResult.transaction._id, user._id, 'Top-up');
+    }
+    return res.status(200).json({
+      message: 'Simulated top-up applied',
+      ...(topUpResult.target === TOPUP_TARGET.BOTH ? { transactions: topUpResult.transactions } : { transaction: topUpResult.transaction }),
+    });
+  } catch (error) {
+    console.error('Simulate webhook error', error);
+    return res.status(500).json({ message: 'Simulate failed' });
+  }
+}
+
+// Legacy callers use the same signed preview and confirmation contract.
+export const createPayoutRequest = (req, res) => confirmWithdrawal(req, res);
+
+export async function listMyPayoutRequests(req, res) {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+    const requestedBalanceTarget = req.query?.balanceTarget == null ? null : normalizePayoutBalanceTarget(req.query.balanceTarget);
+    if (requestedBalanceTarget && !['WORKER', 'EMPLOYER'].includes(requestedBalanceTarget)) {
+      return res.status(400).json({ message: 'Payout balance target must be worker or employer' });
+    }
+    const payoutFilter = requestedBalanceTarget === 'WORKER'
+      ? { user: userId, $or: [{ sourceWallet: 'WORKER' }, { sourceWallet: { $exists: false }, balanceTarget: { $ne: 'EMPLOYER' } }] }
+      : { user: userId, ...(requestedBalanceTarget ? { $or: [{ sourceWallet: requestedBalanceTarget }, { sourceWallet: { $exists: false }, balanceTarget: requestedBalanceTarget }] } : {}) };
+    const requests = await PayoutRequest.find(payoutFilter)
+      .populate('transaction')
+      .populate('reviewer', 'firstName lastName email')
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({ payoutRequests: requests });
+  } catch (error) {
+    console.error('List my payout requests error', error);
+    return res.status(500).json({ message: 'Failed to fetch payout requests' });
+  }
+}
+
+export async function cancelPayoutRequest(req, res) {
+  let session;
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    const { payoutRequestId } = req.params;
+    if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+    session = await mongoose.startSession();
+    let payoutRequest;
+    let refund;
+    await session.withTransaction(async () => {
+      refund = undefined;
+      payoutRequest = await PayoutRequest.findOneAndUpdate(
+        { _id: payoutRequestId, user: userId, processingMode: { $ne: 'automatic' }, status: 'requested' },
+        { $set: { status: 'cancelled', cancelledAt: new Date(), reviewedAt: new Date(), reviewNotes: 'Cancelled by user.' }, $push: { events: { status: 'cancelled', actor: userId, note: 'Cancelled by user.', at: new Date() } } },
+        { returnDocument: 'after', session },
+      );
+      if (!payoutRequest) {
+        const current = await PayoutRequest.findOne({ _id: payoutRequestId, user: userId }).session(session);
+        if (!current) throw payoutHttpError(404, 'Payout request not found');
+        if (current.status === 'cancelled') {
+          payoutRequest = current;
+          return;
+        }
+        throw payoutHttpError(400, 'Only requested payouts can be cancelled');
+      }
+      ({ refund } = await createPayoutRefund({
+        payoutRequest,
+        actorId: userId,
+        reason: 'cancelled_by_user',
+        status: 'cancelled',
+        session,
+      }));
+      await queueNotification(`withdrawal-cancelled:${payoutRequest._id}`, { userId: String(userId), audience: payoutRequest.sourceWallet === 'EMPLOYER' ? 'employer' : 'worker', type: 'payout', title: 'Withdrawal cancelled', message: 'Reserved funds were returned to the original wallet.', entityType: 'payout_request', entityId: String(payoutRequest._id) }, session);
+    });
+
+    return res.status(200).json({ message: 'Payout request cancelled.', payoutRequest, refundTransaction: refund });
+  } catch (error) {
+    if (!error?.statusCode) console.error('Cancel payout request error', error);
+    return res.status(error?.statusCode || 500).json({ message: error?.statusCode ? error.message : 'Failed to cancel payout request' });
+  } finally {
+    session?.endSession();
+  }
+}
+
+export async function listAdminPayoutRequests(req, res) {
+  try {
+    const { status, search } = req.query || {};
+    const filter = {};
+    if (status) filter.status = status;
+
+    let requests = await PayoutRequest.find(filter)
+      .populate('user', 'firstName lastName email role status workerBalance employerBalance')
+      .populate('reviewer', 'firstName lastName email')
+      .populate('transaction')
+      .sort({ createdAt: -1 });
+
+    if (search) {
+      const query = String(search).trim().toLowerCase();
+      requests = requests.filter((item) => {
+        const name = `${item.user?.firstName || ''} ${item.user?.lastName || ''}`.toLowerCase();
+        const email = String(item.user?.email || '').toLowerCase();
+        const institutionName = String(item.destinationSnapshot?.institutionName || '').toLowerCase();
+        return name.includes(query) || email.includes(query) || institutionName.includes(query);
+      });
+    }
+
+    return res.status(200).json({ payoutRequests: requests });
+  } catch (error) {
+    console.error('List admin payout requests error', error);
+    return res.status(500).json({ message: 'Failed to fetch payout requests' });
+  }
+}
+
+export async function updateAdminPayoutRequest(req, res) {
+  let session;
+  try {
+    const { payoutRequestId } = req.params;
+    const { status, reviewNotes, transferReference } = req.body || {};
+    const actorId = req.user?.id || req.user?.userId;
+    const allowed = ['approved', 'rejected', 'paid'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ message: 'Invalid payout status' });
+    }
+    const normalizedNotes = String(reviewNotes || '').trim();
+    if (normalizedNotes.length > 2000) {
+      return res.status(400).json({ message: 'Review notes must be 2000 characters or fewer' });
+    }
+    if (status === 'rejected' && !normalizedNotes) {
+      return res.status(400).json({ message: 'Review notes are required when rejecting a payout' });
+    }
+
+    if (status === 'paid' && (!String(transferReference || '').trim() || String(transferReference).length > 200)) return res.status(400).json({ message: 'A transfer reference is required before recording payment.' });
+    const sourceStatuses = status === 'approved' ? ['requested'] : status === 'paid' ? ['approved'] : ['requested', 'approved'];
+    session = await mongoose.startSession();
+    let payoutRequest;
+    let changed = false;
+    await session.withTransaction(async () => {
+      changed = false;
+      const updates = {
+        status,
+        reviewer: actorId,
+        reviewedAt: new Date(),
+        ...(normalizedNotes ? { reviewNotes: normalizedNotes } : {}),
+        ...(status === 'paid' ? { paidAt: new Date(), transferReference: String(transferReference).trim() } : {}),
+      };
+      payoutRequest = await PayoutRequest.findOneAndUpdate(
+        { _id: payoutRequestId, processingMode: { $ne: 'automatic' }, status: { $in: sourceStatuses } },
+        { $set: updates, $push: { events: { status, actor: actorId, note: normalizedNotes || String(transferReference || ''), at: new Date() } } },
+        { returnDocument: 'after', session },
+      );
+
+      if (!payoutRequest) {
+        const current = await PayoutRequest.findById(payoutRequestId).session(session);
+        if (!current) throw payoutHttpError(404, 'Payout request not found');
+        if (current.processingMode === 'automatic') throw payoutHttpError(409, 'Automatic transfers must be reconciled with the provider.');
+        if (current.status === status) {
+          payoutRequest = current;
+          return;
+        }
+        const expected = status === 'paid' ? 'approved' : status === 'approved' ? 'requested' : 'requested or approved';
+        throw payoutHttpError(409, `Payout must be ${expected} before it can be marked ${status}`);
+      }
+
+      if (status === 'paid' && payoutRequest.transaction) {
+        await Transaction.findByIdAndUpdate(
+          payoutRequest.transaction,
+          { $set: { status: 'COMPLETED' } },
+          { session },
+        );
+      }
+      if (status === 'rejected') {
+        await createPayoutRefund({
+          payoutRequest,
+          actorId,
+          reason: normalizedNotes,
+          status: 'rejected',
+          session,
+        });
+      }
+      await queueNotification(`withdrawal-${status}:${payoutRequest._id}`, { userId: String(payoutRequest.user), audience: payoutRequest.sourceWallet === 'EMPLOYER' ? 'employer' : 'worker', type: 'payout', title: `Withdrawal ${status}`, message: status === 'rejected' ? 'The request was rejected and funds were returned to your original wallet.' : status === 'paid' ? 'Finance recorded your external transfer as paid.' : 'Finance approved your withdrawal; the external transfer is pending.', entityType: 'payout_request', entityId: String(payoutRequest._id) }, session);
+      changed = true;
+    });
+
+    if (changed) {
+      await monitor.audit({
+        actor: actorId,
+        action: `payout_${status}`,
+        ip: req.ip || null,
+        userAgent: req.get?.('user-agent') || null,
+        amount: payoutRequest.amount,
+        status: 'success',
+        meta: { payoutRequestId: payoutRequest._id, reviewNotes: normalizedNotes || undefined },
+      });
+    }
+
+    const populated = await PayoutRequest.findById(payoutRequest._id)
+      .populate('user', 'firstName lastName email role status workerBalance employerBalance')
+      .populate('reviewer', 'firstName lastName email')
+      .populate('transaction');
+    if (changed && status === 'paid' && populated?.transaction?._id) {
+      await sendReceiptWithoutBlockingPayment(populated.transaction._id, populated.user?._id || payoutRequest.user, 'Withdrawal');
+    }
+    return res.status(200).json({ message: 'Payout request updated.', payoutRequest: populated });
+  } catch (error) {
+    if (!error?.statusCode) console.error('Update admin payout request error', error);
+    return res.status(error?.statusCode || 500).json({ message: error?.statusCode ? error.message : 'Failed to update payout request' });
+  } finally {
+    session?.endSession();
+  }
+}
+
+export async function getAllTransactions(req, res) {
+  try {
+    const requesterId = req.user?.id || req.user?.userId;
+    if (!requesterId) return res.status(401).json({ message: 'Authentication required' });
+
+    const requester = await User.findById(requesterId).select('role');
+    const role = requester?.role || '';
+    if (!requester || (role !== 'admin' && role !== 'superadmin')) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const txs = await populateTransactionQuery(
+      Transaction.find().sort({ createdAt: -1 }).limit(1000)
+    );
+    return res.status(200).json({ transactions: txs });
+  } catch (error) {
+    console.error('Get all transactions error', error);
+    return res.status(500).json({ message: 'Failed to fetch transactions' });
+  }
+}
+
+export default {
+  getUserTransactions,
+  emailTransactionReceipt,
+  createTopUpSession,
+  handleWebhook,
+  confirmTopUp,
+  simulateWebhook,
+  getAllTransactions,
+  createPayoutRequest,
+  listMyPayoutRequests,
+  cancelPayoutRequest,
+  listAdminPayoutRequests,
+  updateAdminPayoutRequest,
+};

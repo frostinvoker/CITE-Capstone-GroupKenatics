@@ -1,0 +1,401 @@
+import SupportTicket from '../models/SupportTicket.js';
+import { getWebOrigin } from '../lib/runtimeConfig.js';
+import User from '../models/User.js';
+import { createNotification } from '../lib/notificationService.js';
+import { sendError, sendSuccess } from '../lib/apiResponse.js';
+import { getEmailTransporter, getMailFrom } from '../lib/emailTransporter.js';
+import { hasPermission, resolveStaffRole } from '../lib/adminPermissions.js';
+
+const getUserId = (req) => req.user?.id || req.user?.userId || null;
+
+/**
+ * Support scope: 'admin' sees every ticket plus internal notes and private
+ * fields; 'user' sees only their own.
+ *
+ * This is decided by the **permission**, never by the role. `getSupportTicketById`
+ * and `replyToSupportTicket` are mounted twice -- under
+ * /api/admin/support/tickets/... behind
+ * requirePermission('support.tickets.handle'), and under /api/support/tickets/...
+ * behind `auth` only (users need their own tickets there). Returning 'admin' for
+ * any admin-shaped role meant a finance_team, analytics_team or moderator
+ * account -- none of which hold support.tickets.handle -- could read and reply to
+ * every user's ticket, internal notes included, by using the user-facing path,
+ * routing straight around the permission matrix.
+ *
+ * Deciding it here fixes both mounts at once: the admin path is still gated by
+ * its middleware, and the user-facing path now grants admin scope only to
+ * accounts that actually hold the permission.
+ */
+const getRole = (req) => {
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role !== 'admin' && role !== 'superadmin') return 'user';
+  return hasPermission(resolveStaffRole(req.user), 'support.tickets.handle') ? 'admin' : 'user';
+};
+
+const populateTicket = (query) =>
+  query
+    .populate('requester', 'firstName lastName email role status avatarUrl')
+    .populate('messages.author', 'firstName lastName email role status')
+    .populate('internalNotes.author', 'firstName lastName email role status');
+
+const includeInternalNotes = (query) => query.select('+internalNotes');
+
+const getSupportAlertEmailList = () => {
+  const configured = String(process.env.SUPPORT_ALERT_EMAILS || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(configured);
+};
+
+const isDeliverableEmail = (value) => {
+  const email = String(value || '').trim().toLowerCase();
+  if (!email) return false;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+  const domain = email.split('@')[1] || '';
+  // Skip local/dev-only domains that cause bounce emails in production SMTP.
+  if (domain.endsWith('.local') || domain.endsWith('.invalid') || domain === 'localhost') return false;
+  return true;
+};
+
+const findAdminRecipients = async () =>
+  User.find({
+    role: { $regex: /^(admin|superadmin)$/i },
+    // Do not route new Support conversations or emails to inactive staff.
+    status: 'active',
+  })
+    .sort({ role: 1, createdAt: 1, _id: 1 })
+    .select('_id email firstName lastName role')
+    .lean();
+
+const notifyAdminsByEmail = async ({ ticket, requester, eventType = 'created' }) => {
+  const transporter = getEmailTransporter();
+  if (!transporter) return;
+
+  const admins = await findAdminRecipients();
+  const emailSet = getSupportAlertEmailList();
+  admins.forEach((admin) => {
+    if (admin?.email) emailSet.add(String(admin.email).toLowerCase().trim());
+  });
+
+  const recipients = Array.from(emailSet).filter(isDeliverableEmail);
+
+  if (!recipients.length) return;
+
+  const requesterName = `${requester?.firstName || ''} ${requester?.lastName || ''}`.trim() || requester?.email || 'User';
+  const requesterRole = String(requester?.role || 'user').toLowerCase();
+  const subjectPrefix = eventType === 'reply' ? 'Support ticket reply' : 'New support ticket';
+  const mailSubject = `[MicroJobs] ${subjectPrefix}: ${ticket.subject}`;
+  const from = getMailFrom();
+  const ticketId = String(ticket._id || '');
+  const appBase = getWebOrigin();
+  const ticketUrl = `${String(appBase).replace(/\/$/, '')}/admin/support`;
+
+  const text = [
+    `${subjectPrefix}`,
+    '',
+    `Ticket ID: ${ticketId}`,
+    `Subject: ${ticket.subject}`,
+    `Category: ${ticket.category}`,
+    `Priority: ${ticket.priority}`,
+    `Status: ${ticket.status}`,
+    `Submitted by: ${requesterName} (${requesterRole})`,
+    `Requester email: ${requester?.email || 'N/A'}`,
+    '',
+    `Open in admin panel: ${ticketUrl}`,
+  ].join('\n');
+
+  await Promise.allSettled(
+    recipients.map((to) => transporter.sendMail({ from, to, subject: mailSubject, text }))
+  );
+};
+
+function shapeTicket(ticket, { includePrivate = false } = {}) {
+  if (!ticket) return null;
+  const doc = ticket.toObject ? ticket.toObject() : ticket;
+  if (!includePrivate) delete doc.internalNotes;
+  return {
+    ...doc,
+    messageCount: Array.isArray(doc.messages) ? doc.messages.length : 0,
+  };
+}
+
+export async function listSupportAgents(req, res) {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return sendError(res, 401, 'Authentication required.');
+
+    const admins = await findAdminRecipients();
+    const agents = admins.map((admin) => ({
+      _id: String(admin._id),
+      firstName: admin.firstName || '',
+      lastName: admin.lastName || '',
+      email: admin.email || '',
+      role: String(admin.role || '').toLowerCase(),
+      displayName:
+        `${admin.firstName || ''} ${admin.lastName || ''}`.trim() ||
+        admin.email ||
+        'Support Admin',
+    }));
+
+    return sendSuccess(res, 200, 'Support agents retrieved.', agents, { agents });
+  } catch (error) {
+    console.error('List support agents error:', error);
+    return sendError(res, 500, 'Failed to load support agents.');
+  }
+}
+
+export async function listMySupportTickets(req, res) {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return sendError(res, 401, 'Authentication required.');
+
+    const tickets = await populateTicket(
+      SupportTicket.find({ requester: userId }).sort({ updatedAt: -1 })
+    );
+
+    const items = tickets.map(shapeTicket);
+    return sendSuccess(res, 200, 'Support tickets retrieved.', items, { tickets: items });
+  } catch (error) {
+    console.error('List my support tickets error:', error);
+    return sendError(res, 500, 'Failed to load support tickets.');
+  }
+}
+
+export async function createSupportTicket(req, res) {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return sendError(res, 401, 'Authentication required.');
+
+    const { subject, category = 'general', priority = 'medium', message } = req.body || {};
+    if (!subject || !String(subject).trim()) return sendError(res, 400, 'subject is required.');
+    if (!message || !String(message).trim()) return sendError(res, 400, 'message is required.');
+
+    const ticket = await SupportTicket.create({
+      requester: userId,
+      subject: String(subject).trim(),
+      category: String(category || 'general').trim() || 'general',
+      priority: ['low', 'medium', 'high', 'urgent'].includes(priority) ? priority : 'medium',
+      messages: [
+        {
+          author: userId,
+          actorRole: 'user',
+          body: String(message).trim(),
+        },
+      ],
+      lastMessageAt: new Date(),
+    });
+
+    const populated = await populateTicket(SupportTicket.findById(ticket._id));
+
+    const admins = await findAdminRecipients();
+    await Promise.all(
+      admins.map((admin) =>
+        createNotification({
+          userId: admin._id,
+          type: 'support',
+          title: 'New support ticket',
+          message: `Support ticket "${ticket.subject}" was submitted.`,
+          entityType: 'support_ticket',
+          entityId: ticket._id,
+          actor: userId,
+          push: true,
+          socketPayload: { ticketId: String(ticket._id), subject: ticket.subject, status: ticket.status },
+        })
+      )
+    );
+
+    await notifyAdminsByEmail({
+      ticket,
+      requester: populated?.requester,
+      eventType: 'created',
+    });
+
+    return sendSuccess(res, 201, 'Support ticket created.', shapeTicket(populated), {
+      ticket: shapeTicket(populated),
+    });
+  } catch (error) {
+    console.error('Create support ticket error:', error);
+    return sendError(res, 500, 'Failed to create support ticket.');
+  }
+}
+
+export async function getSupportTicketById(req, res) {
+  try {
+    const userId = getUserId(req);
+    const actorRole = getRole(req);
+    const { ticketId } = req.params;
+    if (!userId) return sendError(res, 401, 'Authentication required.');
+
+    const filter = actorRole === 'admin' ? { _id: ticketId } : { _id: ticketId, requester: userId };
+    const baseQuery = SupportTicket.findOne(filter);
+    const ticket = await populateTicket(actorRole === 'admin' ? includeInternalNotes(baseQuery) : baseQuery);
+    if (!ticket) return sendError(res, 404, 'Support ticket not found.');
+
+    const shaped = shapeTicket(ticket, { includePrivate: actorRole === 'admin' });
+    return sendSuccess(res, 200, 'Support ticket retrieved.', shaped, { ticket: shaped });
+  } catch (error) {
+    console.error('Get support ticket error:', error);
+    return sendError(res, 500, 'Failed to load support ticket.');
+  }
+}
+
+export async function replyToSupportTicket(req, res) {
+  try {
+    const userId = getUserId(req);
+    const actorRole = getRole(req);
+    const { ticketId } = req.params;
+    const { message } = req.body || {};
+    if (!userId) return sendError(res, 401, 'Authentication required.');
+    if (!message || !String(message).trim()) return sendError(res, 400, 'message is required.');
+
+    const filter = actorRole === 'admin' ? { _id: ticketId } : { _id: ticketId, requester: userId };
+    const ticket = await SupportTicket.findOne(filter);
+    if (!ticket) return sendError(res, 404, 'Support ticket not found.');
+    if (ticket.status === 'closed') return sendError(res, 400, 'Closed tickets cannot be updated.');
+
+    ticket.messages.push({
+      author: userId,
+      actorRole,
+      body: String(message).trim(),
+      createdAt: new Date(),
+    });
+    ticket.lastMessageAt = new Date();
+    if (actorRole === 'admin') {
+      ticket.status = 'waiting_user';
+      ticket.lastAdminReplyAt = new Date();
+    } else if (ticket.status === 'waiting_user') {
+      ticket.status = 'in_progress';
+    }
+    await ticket.save();
+
+    const populatedQuery = SupportTicket.findById(ticket._id);
+    const populated = await populateTicket(actorRole === 'admin' ? includeInternalNotes(populatedQuery) : populatedQuery);
+
+    if (actorRole === 'admin') {
+      await createNotification({
+        userId: ticket.requester,
+        type: 'support',
+        title: 'Support replied',
+        message: `There is a new reply on ticket "${ticket.subject}".`,
+        entityType: 'support_ticket',
+        entityId: ticket._id,
+        actor: userId,
+        push: true,
+        socketPayload: { ticketId: String(ticket._id), subject: ticket.subject, status: ticket.status },
+      });
+    } else {
+      const admins = await findAdminRecipients();
+      await Promise.all(
+        admins.map((admin) =>
+          createNotification({
+            userId: admin._id,
+            type: 'support',
+            title: 'Support ticket updated',
+            message: `Ticket "${ticket.subject}" has a new user reply.`,
+            entityType: 'support_ticket',
+            entityId: ticket._id,
+            actor: userId,
+            push: true,
+            socketPayload: { ticketId: String(ticket._id), subject: ticket.subject, status: ticket.status },
+          })
+        )
+      );
+
+      await notifyAdminsByEmail({
+        ticket,
+        requester: populated?.requester,
+        eventType: 'reply',
+      });
+    }
+
+    const shaped = shapeTicket(populated, { includePrivate: actorRole === 'admin' });
+    return sendSuccess(res, 200, 'Support ticket updated.', shaped, { ticket: shaped });
+  } catch (error) {
+    console.error('Reply to support ticket error:', error);
+    return sendError(res, 500, 'Failed to update support ticket.');
+  }
+}
+
+export async function listAdminSupportTickets(req, res) {
+  try {
+    const { status, priority, search } = req.query || {};
+    const filter = {};
+    if (status) filter.status = status;
+    if (priority) filter.priority = priority;
+
+    let tickets = await populateTicket(includeInternalNotes(SupportTicket.find(filter).sort({ updatedAt: -1 })));
+    if (search) {
+      const query = String(search).trim().toLowerCase();
+      tickets = tickets.filter((ticket) => {
+        const subject = String(ticket.subject || '').toLowerCase();
+        const requesterName = `${ticket.requester?.firstName || ''} ${ticket.requester?.lastName || ''}`.toLowerCase();
+        const requesterEmail = String(ticket.requester?.email || '').toLowerCase();
+        return subject.includes(query) || requesterName.includes(query) || requesterEmail.includes(query);
+      });
+    }
+
+    const items = tickets.map((ticket) => shapeTicket(ticket, { includePrivate: true }));
+    return sendSuccess(res, 200, 'Admin support tickets retrieved.', items, { tickets: items });
+  } catch (error) {
+    console.error('List admin support tickets error:', error);
+    return sendError(res, 500, 'Failed to load support tickets.');
+  }
+}
+
+export async function updateAdminSupportTicket(req, res) {
+  try {
+    const { ticketId } = req.params;
+    const { status, priority, reviewNotes } = req.body || {};
+    const ticket = await includeInternalNotes(SupportTicket.findById(ticketId));
+    if (!ticket) return sendError(res, 404, 'Support ticket not found.');
+    const previousStatus = ticket.status;
+
+    if (status) {
+      const allowedStatuses = ['open', 'in_progress', 'waiting_user', 'resolved', 'closed'];
+      if (!allowedStatuses.includes(status)) return sendError(res, 400, 'Invalid support status.');
+      ticket.status = status;
+      if (status === 'resolved') ticket.resolvedAt = new Date();
+      else ticket.resolvedAt = null;
+      if (status === 'closed') ticket.closedAt = new Date();
+      else ticket.closedAt = null;
+    }
+    if (priority) {
+      const allowedPriorities = ['low', 'medium', 'high', 'urgent'];
+      if (!allowedPriorities.includes(priority)) return sendError(res, 400, 'Invalid support priority.');
+      ticket.priority = priority;
+    }
+    if (reviewNotes !== undefined) {
+      const note = String(reviewNotes || '').trim();
+      if (!note) return sendError(res, 400, 'Internal note cannot be empty.');
+      ticket.internalNotes.push({
+        author: req.user.id,
+        body: note,
+        createdAt: new Date(),
+      });
+    }
+
+    await ticket.save();
+    const populated = await populateTicket(includeInternalNotes(SupportTicket.findById(ticket._id)));
+
+    if (ticket.status !== previousStatus) {
+      await createNotification({
+        userId: ticket.requester,
+        type: 'support',
+        title: 'Support ticket updated',
+        message: `Your support ticket "${ticket.subject}" is now ${ticket.status.replace(/_/g, ' ')}.`,
+        entityType: 'support_ticket',
+        entityId: ticket._id,
+        actor: req.user.id,
+        push: true,
+        socketPayload: { ticketId: String(ticket._id), subject: ticket.subject, status: ticket.status },
+      });
+    }
+
+    const shaped = shapeTicket(populated, { includePrivate: true });
+    return sendSuccess(res, 200, 'Support ticket updated.', shaped, { ticket: shaped });
+  } catch (error) {
+    console.error('Update admin support ticket error:', error);
+    return sendError(res, 500, 'Failed to update support ticket.');
+  }
+}
